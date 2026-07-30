@@ -1,0 +1,6 @@
+.worktrees/
+.dart_tool/
+build/
+*.iml
+.idea/
+docs/superpowers/
