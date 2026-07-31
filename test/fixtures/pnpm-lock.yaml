@@ -1,0 +1,32 @@
+lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      left-pad:
+        specifier: ^1.3.0
+        version: 1.3.0
+      '@scope/pkg':
+        specifier: ^2.0.0
+        version: 2.0.1
+    devDependencies:
+      typescript:
+        specifier: ^5.4.0
+        version: 5.4.0
+
+packages:
+  /left-pad@1.3.0:
+    resolution: {integrity: sha512-fake==}
+
+  /@scope/pkg@2.0.1:
+    resolution: {integrity: sha512-fake==}
+
+  /typescript@5.4.0:
+    resolution: {integrity: sha512-fake==}
+    dev: true
+
+  /foo@1.0.0:
+    resolution: {integrity: sha512-fake==}
+
+  /bar@1.5.0(foo@1.0.0):
+    resolution: {integrity: sha512-fake==}

@@ -1,6 +1,9 @@
 .worktrees/
+.claude/worktrees/
+.superpowers/
 .dart_tool/
 build/
 *.iml
 .idea/
 docs/superpowers/
+.flutter-plugins-dependencies
