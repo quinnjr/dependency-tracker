@@ -86,6 +86,14 @@ final DateTime _publishedAtFallback = DateTime.utc(1970);
 /// Sorts [versions] oldest-first by `publishedAt`, breaking ties (including
 /// entries that share the [_publishedAtFallback] fallback) by `compareVersions` so the
 /// order is fully deterministic and `.last` is always the genuinely newest.
+///
+/// `compareVersions` sorts a malformed version string strictly below any
+/// version it parsed cleanly, independent of either version's numbers. So
+/// when a tie is broken between a malformed entry (e.g. a registry tag like
+/// `"nightly"`) and a well-formed one, the malformed entry always loses —
+/// even against a low clean version like `"0.0.1"` — because a string that
+/// isn't a real version can never be the "genuinely newest" one. This is the
+/// intended guarantee, not an accidental side effect of the tiebreak.
 void _sortByPublishedAt(List<VersionInfo> versions) {
   versions.sort((a, b) {
     final timeCmp = (a.publishedAt ?? _publishedAtFallback).compareTo(

@@ -129,6 +129,25 @@ void main() {
         expect(r.versions.every((v) => v.publishedAt == null), isTrue);
       },
     );
+
+    test('a malformed version loses a publishedAt tie to a clean one, '
+        'regardless of its numbers', () async {
+      const tiedMalformedBody = '''
+{
+  "name": "http",
+  "latest": {"version": "0.0.1"},
+  "versions": [
+    {"version": "0.0.1", "published": "2024-06-01T10:00:00.000Z"},
+    {"version": "nightly", "published": "2024-06-01T10:00:00.000Z"}
+  ]
+}''';
+      final r = await fetchRegistry(
+        netReturning(tiedMalformedBody),
+        w(WatchKind.pub, 'http'),
+      );
+      expect(r.versions.map((v) => v.version), ['nightly', '0.0.1']);
+      expect(r.versions.last.version, '0.0.1');
+    });
   });
 
   group('npm', () {
