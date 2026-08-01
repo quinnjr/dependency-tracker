@@ -24,6 +24,11 @@ class WatchCounts {
 /// The only mutable state in the app. Both the UI and the MCP server hold a
 /// reference to one instance, which is why an agent calling `add_watch` shows up
 /// in the open window with no extra plumbing.
+///
+/// Mutators of UI-visible state (`watch`, `usage`, `release`, `scan_root`)
+/// call `notifyListeners()` exactly once per call. `meta` and `http_cache`
+/// are internal bookkeeping the UI never renders and are exempt from that
+/// rule — see the "meta and http cache" section below for the specifics.
 class Store extends ChangeNotifier implements EtagCache {
   Store._(this._db);
 
@@ -134,19 +139,41 @@ class Store extends ChangeNotifier implements EtagCache {
   /// — passes false and relies on its own single notifyListeners() (here,
   /// replaceUsagesForProject's) to represent the whole batch as one change,
   /// rather than firing one notification per dependency.
+  ///
+  /// `watch` is UI-visible state, so (per-call batching aside) this follows
+  /// the same rule as the rest of the file: mutators of state the UI renders
+  /// notify exactly once per call. That rule does not extend to every
+  /// mutator in this file — see the `meta`/`http_cache` section below for
+  /// the two tables it deliberately does not cover.
+  ///
+  /// Uses `RETURNING id` to fold the insert and the id lookup into one
+  /// round trip on the common (no-conflict) path; SQLite has supported
+  /// `RETURNING` since 3.35, and this app's bundled sqlite3 links 3.53.4 (see
+  /// the SQLite version check in `store_test.dart`), so the feature is safe
+  /// to rely on here. `ON CONFLICT DO NOTHING` means a conflicting insert
+  /// returns no row, so the conflict path still needs a fallback `SELECT` to
+  /// find the existing row's id — this only removes the second round trip
+  /// for genuinely new watches, not for repeats.
   int upsertWatch(WatchKind kind, String displayName, {bool notify = true}) {
     final name = canonicalize(kind, displayName);
-    _db.execute(
+    final inserted = _db.select(
       'INSERT INTO watch (kind, name, display_name) VALUES (?, ?, ?) '
-      'ON CONFLICT(kind, name) DO NOTHING',
+      'ON CONFLICT(kind, name) DO NOTHING RETURNING id',
       [kind.name, name, displayName],
     );
-    final row = _db.select('SELECT id FROM watch WHERE kind = ? AND name = ?', [
-      kind.name,
-      name,
-    ]).first;
+    final int id;
+    if (inserted.isNotEmpty) {
+      id = inserted.first['id'] as int;
+    } else {
+      id =
+          _db.select('SELECT id FROM watch WHERE kind = ? AND name = ?', [
+                kind.name,
+                name,
+              ]).first['id']
+              as int;
+    }
     if (notify) notifyListeners();
-    return row['id'] as int;
+    return id;
   }
 
   Watch? watchById(int id) {
@@ -310,6 +337,10 @@ class Store extends ChangeNotifier implements EtagCache {
   /// `last_error` back to NULL; passing neither `lastError` nor `clearError`
   /// leaves it untouched. `lastCheckedAt` is caller-supplied rather than
   /// stamped internally, so a refresh orchestrator controls its own clock.
+  ///
+  /// `watch` is UI-visible state, so this notifies on every call, same as
+  /// [upsertWatch] — see the `meta`/`http_cache` section below for the two
+  /// tables that are exempt from that rule.
   void setWatchMeta(
     int id, {
     String? repoUrl,
@@ -573,12 +604,25 @@ class Store extends ChangeNotifier implements EtagCache {
   }
 
   // --- meta and http cache -----------------------------------------------------
+  //
+  // Unlike `watch`, `usage`, `release`, and `scan_root` above — state the UI
+  // actually renders, and whose mutators all notify exactly once per call —
+  // `meta` and `http_cache` are internal bookkeeping the UI never reads. Their
+  // mutators are exempt from the notify convention: [metaSet] notifies only
+  // because it costs nothing to do so (see below), and [putCache] does not
+  // notify at all.
 
   String? metaGet(String key) {
     final rows = _db.select('SELECT value FROM meta WHERE key = ?', [key]);
     return rows.isEmpty ? null : rows.first['value'] as String;
   }
 
+  /// `meta` is internal bookkeeping, not UI-rendered state, so this would be
+  /// exempt from the notify convention like [putCache] below. It still
+  /// notifies because its only caller today is [_migrate], which runs before
+  /// `Store.open`/`openInMemory` return and thus before any listener can have
+  /// attached — the notification is a no-op in practice, so removing it
+  /// would only churn a passing test for symmetry's sake.
   void metaSet(String key, String value) {
     _db.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
       key,
@@ -599,6 +643,11 @@ class Store extends ChangeNotifier implements EtagCache {
     return rows.isEmpty ? null : rows.first['body'] as String;
   }
 
+  /// Deliberately does not call `notifyListeners()`: `http_cache` is
+  /// internal bookkeeping the UI never renders, not UI-visible state like
+  /// `watch` or `release`, and a refresh can write hundreds of cache entries
+  /// in quick succession — notifying per entry would trigger a full shell
+  /// rebuild on every HTTP fetch instead of once for the refresh as a whole.
   @override
   void putCache(String url, String? etag, String body) => _db.execute(
     'INSERT OR REPLACE INTO http_cache (url, etag, body, fetched_at) '

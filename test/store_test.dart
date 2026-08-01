@@ -384,7 +384,8 @@ void main() {
     expect(notified, 2);
   });
 
-  test('metaSet notifies listeners, like every other public mutator', () {
+  test('metaSet notifies listeners, unlike putCache, its http_cache '
+      'counterpart', () {
     var notified = 0;
     store.addListener(() => notified++);
     store.metaSet('some_key', 'some_value');
