@@ -50,34 +50,55 @@ int? _coerceOptionalInt(Object? v, String paramName) {
   throw ArgumentError.value(v, paramName, 'must be an integer');
 }
 
+/// Resolves [name] to a watch id, the same way add_watch does, rather than
+/// rolling a second definition of package identity here: canonicalize()
+/// already knows each kind's equivalence rule (PyPI folds `-_.` together,
+/// Go does not fold case at all), so trying it is what lets add_watch and
+/// get_watch agree on every spelling — and, just as importantly, refuse to
+/// agree on a Go module path differing only in case.
+int _resolveWatchByName(Store store, String name) {
+  for (final k in WatchKind.values) {
+    final w = store.watchByIdentity(k, canonicalize(k, name));
+    if (w != null) return w.id!;
+  }
+  // Exact fallback for a spelling no kind's canonicalize() recognises as
+  // equivalent to anything stored. Case-sensitive: a case-insensitive
+  // fallback would reintroduce the Go over-match canonicalize() exists to
+  // prevent.
+  for (final w in store.watches()) {
+    if (w.displayName == name) return w.id!;
+  }
+  throw ArgumentError.value(name, 'name', 'no such watch');
+}
+
 int _requireWatchId(Store store, Map<String, Object?> args) {
   final id = _coerceOptionalInt(args['id'], 'id');
+  final name = args['name'];
+  final hasName = name is String;
+
   if (id != null) {
     if (store.watchById(id) == null) {
       throw ArgumentError.value(id, 'id', 'no such watch');
     }
+    // A caller passing both id and name only is safe to honour if the two
+    // actually agree — an agent that drifted (a correct id alongside a
+    // stale or wrong name) must be told its inputs disagree rather than
+    // have the mismatch silently swallowed by preferring id, which is
+    // exactly the hazard this check exists to catch. Only resolve name
+    // when it is actually supplied, so the single-parameter path costs no
+    // extra query.
+    if (hasName) {
+      final nameId = _resolveWatchByName(store, name);
+      if (nameId != id) {
+        throw ArgumentError(
+          'id ($id) and name ("$name") refer to different watches',
+        );
+      }
+    }
     return id;
   }
-  final name = args['name'];
-  if (name is String) {
-    // Resolve by identity, the same way add_watch does, rather than rolling
-    // a second definition of package identity here: canonicalize() already
-    // knows each kind's equivalence rule (PyPI folds `-_.` together, Go does
-    // not fold case at all), so trying it is what lets add_watch and
-    // get_watch agree on every spelling — and, just as importantly, refuse
-    // to agree on a Go module path differing only in case.
-    for (final k in WatchKind.values) {
-      final w = store.watchByIdentity(k, canonicalize(k, name));
-      if (w != null) return w.id!;
-    }
-    // Exact fallback for a spelling no kind's canonicalize() recognises as
-    // equivalent to anything stored. Case-sensitive: a case-insensitive
-    // fallback would reintroduce the Go over-match canonicalize() exists to
-    // prevent.
-    for (final w in store.watches()) {
-      if (w.displayName == name) return w.id!;
-    }
-    throw ArgumentError.value(name, 'name', 'no such watch');
+  if (hasName) {
+    return _resolveWatchByName(store, name);
   }
   throw ArgumentError('one of `id` or `name` is required');
 }
@@ -170,13 +191,13 @@ List<ToolDef> buildTools(
             throw ArgumentError.value(kindName, 'kind', 'unknown kind');
           }
         }
+        final limit = _coerceOptionalInt(args['limit'], 'limit');
+        if (limit != null && limit < 1) {
+          throw ArgumentError.value(limit, 'limit', 'must be at least 1');
+        }
         return _watchJsonList(
           store,
-          store.watches(
-            filter: filter,
-            kind: kind,
-            limit: _coerceOptionalInt(args['limit'], 'limit'),
-          ),
+          store.watches(filter: filter, kind: kind, limit: limit),
         );
       },
     ),
@@ -186,7 +207,9 @@ List<ToolDef> buildTools(
       description:
           'Get one watch with every project that uses it and the version each '
           'one pins. This is the cross-repo view: a package used in five '
-          'repos is one watch with five usages.',
+          'repos is one watch with five usages. Accepts id, name, or both; '
+          'if both are given they must identify the same watch or the call '
+          'fails.',
       inputSchema: const {
         'type': 'object',
         'properties': {
@@ -227,7 +250,9 @@ List<ToolDef> buildTools(
       name: 'get_release_notes',
       description:
           'Release notes for a watch, newest first. Pass newer_than to get '
-          'only what shipped after a version you already know about.',
+          'only what shipped after a version you already know about. '
+          'Accepts id, name, or both; if both are given they must identify '
+          'the same watch or the call fails.',
       inputSchema: const {
         'type': 'object',
         'properties': {
@@ -252,6 +277,9 @@ List<ToolDef> buildTools(
           newerThan: args['newer_than'] as String?,
         );
         final limit = _coerceOptionalInt(args['limit'], 'limit');
+        if (limit != null && limit < 1) {
+          throw ArgumentError.value(limit, 'limit', 'must be at least 1');
+        }
         if (limit != null && releases.length > limit) {
           releases = releases.sublist(0, limit);
         }
@@ -377,7 +405,9 @@ List<ToolDef> buildTools(
       name: 'remove_watch',
       description:
           'Stop watching something. Its releases and usage records go '
-          'with it; a rescan recreates the watch if a project still uses it.',
+          'with it; a rescan recreates the watch if a project still uses it. '
+          'Accepts id, name, or both; if both are given they must identify '
+          'the same watch or the call fails.',
       inputSchema: const {
         'type': 'object',
         'properties': {
@@ -404,7 +434,9 @@ List<ToolDef> buildTools(
       name: 'mark_read',
       description:
           'Mark a watch triaged. With no version, marks every release '
-          'read; with a version, only that one.',
+          'read; with a version, only that one. Accepts id, name, or both; '
+          'if both are given they must identify the same watch or the call '
+          'fails.',
       inputSchema: const {
         'type': 'object',
         'properties': {
@@ -432,7 +464,8 @@ List<ToolDef> buildTools(
       name: 'snooze',
       description:
           'Hide a watch from the unread and outdated filters until an '
-          'ISO 8601 timestamp.',
+          'ISO 8601 timestamp. Accepts id, name, or both; if both are given '
+          'they must identify the same watch or the call fails.',
       inputSchema: const {
         'type': 'object',
         'properties': {

@@ -94,6 +94,32 @@ void main() {
     },
   );
 
+  test('list_watches rejects an out-of-range limit with a clear error naming '
+      'the parameter, rather than silently returning an empty list or '
+      'throwing a raw RangeError', () async {
+    seedWatch();
+    await expectLater(
+      call('list_watches', {'limit': 0}),
+      throwsA(
+        isA<ArgumentError>().having(
+          (e) => e.toString(),
+          'message',
+          contains('limit'),
+        ),
+      ),
+    );
+    await expectLater(
+      call('list_watches', {'limit': -1}),
+      throwsA(
+        isA<ArgumentError>().having(
+          (e) => e.toString(),
+          'message',
+          contains('limit'),
+        ),
+      ),
+    );
+  });
+
   test('list_watches honours kind and limit', () async {
     seedWatch(name: 'http');
     seedWatch(name: 'provider');
@@ -231,6 +257,133 @@ void main() {
       );
     },
   );
+
+  test('get_release_notes rejects an out-of-range limit with a clear error '
+      'naming the parameter, rather than silently returning an empty list '
+      'or throwing a raw RangeError', () async {
+    final id = seedWatch();
+    store.insertReleases(id, [Release(watchId: id, version: '1.3.0')]);
+    await expectLater(
+      call('get_release_notes', {'id': id, 'limit': 0}),
+      throwsA(
+        isA<ArgumentError>().having(
+          (e) => e.toString(),
+          'message',
+          contains('limit'),
+        ),
+      ),
+    );
+    await expectLater(
+      call('get_release_notes', {'id': id, 'limit': -1}),
+      throwsA(
+        isA<ArgumentError>().having(
+          (e) => e.toString(),
+          'message',
+          contains('limit'),
+        ),
+      ),
+    );
+  });
+
+  test('the anyOf id-or-name requirement is enforced for every tool that '
+      'advertises it (I2)', () async {
+    const toolsRequiringWatchIdentity = [
+      'get_watch',
+      'get_release_notes',
+      'remove_watch',
+      'mark_read',
+      'snooze',
+    ];
+    for (final name in toolsRequiringWatchIdentity) {
+      final args = name == 'snooze'
+          ? {'until': '2030-01-01T00:00:00Z'}
+          : <String, Object?>{};
+      await expectLater(
+        call(name, args),
+        throwsA(
+          isA<ArgumentError>().having(
+            (e) => e.toString(),
+            'message',
+            allOf(contains('id'), contains('name')),
+          ),
+        ),
+        reason: name,
+      );
+    }
+  });
+
+  test('get_watch resolves by id when both id and name are supplied and '
+      'agree exactly', () async {
+    final id = seedWatch(name: 'http');
+    final r = await call('get_watch', {'id': id, 'name': 'http'}) as Map;
+    expect(r['id'], id);
+  });
+
+  test(
+    'get_watch accepts id plus a differently-spelled name that '
+    'canonicalizes to the same watch (crates.io folds `_` and `-` together)',
+    () async {
+      final added =
+          await call('add_watch', {'kind': 'crates', 'name': 'serde-json'})
+              as Map;
+      final id = added['id'] as int;
+      final r =
+          await call('get_watch', {'id': id, 'name': 'serde_json'}) as Map;
+      expect(r['id'], id);
+    },
+  );
+
+  test('get_watch rejects id and name that resolve to different watches, '
+      'naming both rather than silently preferring id', () async {
+    final id = seedWatch(name: 'http');
+    seedWatch(name: 'provider');
+    await expectLater(
+      call('get_watch', {'id': id, 'name': 'provider'}),
+      throwsA(
+        isA<ArgumentError>().having(
+          (e) => e.toString(),
+          'message',
+          allOf(contains('$id'), contains('provider')),
+        ),
+      ),
+    );
+  });
+
+  test('remove_watch rejects id and name that resolve to different watches '
+      'and removes nothing', () async {
+    final id = seedWatch(name: 'http');
+    final otherId = seedWatch(name: 'provider');
+    await expectLater(
+      call('remove_watch', {'id': id, 'name': 'provider'}),
+      throwsA(
+        isA<ArgumentError>().having(
+          (e) => e.toString(),
+          'message',
+          allOf(contains('$id'), contains('provider')),
+        ),
+      ),
+    );
+    expect(store.watchById(id), isNotNull);
+    expect(store.watchById(otherId), isNotNull);
+  });
+
+  test('mark_read rejects id and name that resolve to different watches and '
+      'leaves releases unread', () async {
+    final id = seedWatch(name: 'http');
+    seedWatch(name: 'provider');
+    store.insertReleases(id, [Release(watchId: id, version: '1.3.0')]);
+    await expectLater(
+      call('mark_read', {'id': id, 'name': 'provider'}),
+      throwsA(
+        isA<ArgumentError>().having(
+          (e) => e.toString(),
+          'message',
+          allOf(contains('$id'), contains('provider')),
+        ),
+      ),
+    );
+    expect(store.releasesFor(id).where((r) => !r.read), hasLength(1));
+  });
 
   test('list_watches attributes each row\'s counts to that watch, not the '
       'next one in the list (regression: batched countsFor key/index '
