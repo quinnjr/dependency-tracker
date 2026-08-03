@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  # Dry run: builds and runs every gate, publishes nothing. The packaging
+  # gates below (the ldd check, the Flatpak smoke test) are the parts of this
+  # repo that a tag would otherwise execute for the very first time in front
+  # of users, and they cannot be exercised locally — the Flatpak has to be
+  # built on a glibc no newer than the runtime's. This makes them runnable on
+  # demand instead.
+  workflow_dispatch:
 
 # Read by default. Only the job that actually publishes gets write, so the
 # three build jobs — which execute third-party build code from pub, cmake, and
@@ -29,9 +36,17 @@ jobs:
         name: Compare tag against pubspec and AppStream metadata
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
-
           pubspec="$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//' | cut -d+ -f1)"
+
+          # A dry run has no tag to agree with, so it takes the pubspec version
+          # and skips the cross-checks — they are about a tag that is not there.
+          if [ "$GITHUB_EVENT_NAME" != "push" ]; then
+            echo "dry run: building $pubspec, publishing nothing"
+            echo "version=$pubspec" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          tag="${GITHUB_REF_NAME#v}"
           if [ "$tag" != "$pubspec" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match pubspec version $pubspec." \
                  "Bump pubspec.yaml or retag before releasing."
@@ -145,6 +160,54 @@ jobs:
           done
           [ "$missing" -eq 0 ] || exit 1
 
+      - name: Smoke-test the Flatpak
+        # Resolving every library is not the same as starting. This launches
+        # the real bundle headlessly and waits for the database to appear,
+        # which proves three things at once: the app runs under the sandbox,
+        # the GTK/GNOME runtime pairing is right, and --filesystem=home:ro is
+        # sufficient — the app writes its state through XDG paths that Flatpak
+        # redirects into ~/.var/app, and never needs to write to $HOME itself.
+        # A read-only grant that broke the database would otherwise surface as
+        # a first-launch crash for whoever installed the release.
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y xvfb
+
+          data="$HOME/.var/app/dev.quinnjr.deptracker/data/deptracker"
+          rm -rf "$data"
+
+          xvfb-run -a flatpak run dev.quinnjr.deptracker > app.log 2>&1 &
+          app=$!
+
+          # Poll rather than sleeping a fixed amount: the app is ready when it
+          # has written its database, and how long that takes is not something
+          # to guess at.
+          for _ in $(seq 1 30); do
+            if compgen -G "$data/*.db" > /dev/null; then break; fi
+            if ! kill -0 "$app" 2>/dev/null; then break; fi
+            sleep 1
+          done
+
+          if ! compgen -G "$data/*.db" > /dev/null; then
+            echo "::error::the app did not create its database within 30s"
+            echo "--- app output ---"
+            cat app.log
+            kill "$app" 2>/dev/null || true
+            exit 1
+          fi
+
+          # Still running, rather than having written a database on its way
+          # down.
+          if ! kill -0 "$app" 2>/dev/null; then
+            echo "::error::the app exited after creating its database"
+            cat app.log
+            exit 1
+          fi
+
+          echo "started, and wrote $(ls "$data")"
+          kill "$app" 2>/dev/null || true
+          wait "$app" 2>/dev/null || true
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux
@@ -206,6 +269,8 @@ jobs:
   release:
     name: Publish GitHub release
     needs: [verify, linux, macos, windows]
+    # Tags publish; a dry run stops after the gates above.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # The only job that needs to write, and it runs no third-party build code.
