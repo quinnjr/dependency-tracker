@@ -287,8 +287,14 @@ void main() {
       );
 
       final report = await refreshAll(s, net);
-      expect(report.failed, 1);
+      // Under the pooled refreshAll, the watch that itself hits the rate
+      // limit is redefined as part of the retry set (see I5 below), not the
+      // failed set: it got no data, same as a watch never dequeued, so a
+      // later refresh should retry it rather than a human reading it as a
+      // permanent failure.
+      expect(report.failed, 0);
       expect(report.refreshed, 0);
+      expect(report.rateLimited, isTrue);
     },
   );
 
@@ -309,15 +315,27 @@ void main() {
       }),
     );
 
-    final report = await refreshAll(s, net);
+    // concurrency: 1 pins this to the pool's sequential-degenerate case: with
+    // a genuine pool (concurrency > 1) all three watches would be dequeued
+    // together and "exactly two requests" would no longer hold, since two
+    // separate workers would each independently reach a network call before
+    // either could observe the other's stop flag. That race is exercised
+    // deliberately below, in 'rate limit under concurrency'; this test keeps
+    // the original one-request-at-a-time story.
+    final report = await refreshAll(s, net, concurrency: 1);
 
     expect(report.rateLimited, isTrue);
     expect(report.refreshed, 1);
+    expect(report.failed, 0);
     // Exactly two requests: the watch that succeeded and the one that hit
     // the rate limit. Nothing further is issued once that happens.
     expect(calls, 2);
     expect(s.watchById(a)!.lastError, isNull);
-    expect(s.watchById(b)!.lastError, contains('429'));
+    // 'bbb' is the watch whose own request hit the rate limit: it is part of
+    // the retry set (see refreshAll's doc comment), so it gets the same
+    // stale message as 'ccc', which was never attempted at all -- neither is
+    // a real failure the way a 404 or a malformed payload is.
+    expect(s.watchById(b)!.lastError, contains('rate limit'));
     expect(s.watchById(c)!.lastError, contains('rate limit'));
   });
 
@@ -325,27 +343,30 @@ void main() {
       'write itself fails', () async {
     // Forces store.markUnattemptedStale to throw without touching store.dart
     // or subclassing Store (its constructor is private to store.dart): close
-    // the store's connection from onProgress, which refreshAll calls
-    // after the per-watch error is already recorded but before it reaches
-    // the batched markUnattemptedStale write. Store.close() is public, and
-    // sqlite3 throws a StateError ("database has already been closed")
-    // for any statement executed afterwards, which is exactly the kind of
+    // the store's connection from onProgress, which refreshAll calls after
+    // the per-watch error is already recorded but before it reaches the
+    // batched markUnattemptedStale write. Store.close() is public, and
+    // sqlite3 throws a StateError ("database has already been closed") for
+    // any statement executed afterwards, which is exactly the kind of
     // failure (a closed store) the finding calls out.
     //
-    // This test's ordering depends on refresh.dart's exact call sequence:
-    // the `done++`/`onProgress?.call(done, targets.length)` pair right
-    // after the rate-limit branch is entered (currently lines 136-137 of
-    // lib/refresh.dart) fires *before* the `store.markUnattemptedStale(...)`
-    // call below it (currently around line 149). If a future refactor
-    // reorders those two so onProgress fires after the stale-marking write,
-    // closing the store from onProgress here would no longer land mid-loop
-    // and this test would silently stop testing what it claims to.
+    // Originally this test forced 'bbb' to be the watch that hit the rate
+    // limit by relying on strict sequential order (onProgress fires with
+    // done == 2 right after the second watch in loop order). Under a worker
+    // pool, completion order is no longer the same thing as queue order, so
+    // "the second watch processed" is no longer guaranteed to be 'bbb' once
+    // more than one worker is in flight. concurrency: 1 pins this test to
+    // the pool's sequential-degenerate case -- one worker, so "dequeued in
+    // order" and "completed in order" coincide again -- which keeps the
+    // guarantee this test polices (a failed stale-marking write still
+    // returns a truthful report) fully exercised without depending on any
+    // cross-worker race.
     final s = _store();
     s.upsertWatch(WatchKind.pub, 'aaa');
     s.upsertWatch(WatchKind.pub, 'bbb');
-    // A third, untouched watch so markUnattemptedStale's skip(i + 1) list is
-    // non-empty (it no-ops on an empty list, which would never exercise
-    // the write we are trying to break).
+    // A third, untouched watch so markUnattemptedStale's list is non-empty
+    // (it no-ops on an empty list, which would never exercise the write we
+    // are trying to break).
     s.upsertWatch(WatchKind.pub, 'ccc');
     final net = Net(
       client: MockClient((req) async {
@@ -359,6 +380,7 @@ void main() {
     final report = await refreshAll(
       s,
       net,
+      concurrency: 1,
       // Fires right after 'bbb' (the rate-limited watch) is processed —
       // after its own last_error write already succeeded, but before
       // refreshAll reaches the batched markUnattemptedStale call for 'ccc'.
@@ -370,7 +392,10 @@ void main() {
     expect(report.rateLimited, isTrue);
     expect(report.staleMarkingFailed, isTrue);
     expect(report.refreshed, 1);
-    expect(report.failed, 1);
+    // 'bbb' is the rate-limited watch itself, so it is part of the retry
+    // set, not the failed set (see the I5 test above) -- no watch here is
+    // counted as a real failure.
+    expect(report.failed, 0);
   });
 
   group('applyFirstFetchBaseline', () {
@@ -504,5 +529,152 @@ void main() {
       ),
     ]);
     expect(highestResolvedUsage(s, id), '1.2.0');
+  });
+
+  group('concurrency', () {
+    test(
+      'refreshAll actually fetches watches concurrently, not one at a time',
+      () async {
+        // Same shape as net_test.dart:142 ("never runs more than
+        // `concurrency` requests at once"), one level up: this proves the
+        // *pool* dispatches multiple watches at once, not just that Net's
+        // own semaphore can. Without an artificial delay every response
+        // would resolve inside a single microtask and never overlap, so
+        // depth alone would not distinguish a real pool from one dispatching
+        // strictly one watch at a time.
+        final s = _store();
+        for (var i = 0; i < 8; i++) {
+          s.upsertWatch(WatchKind.pub, 'pkg$i');
+        }
+        var inFlight = 0;
+        var peak = 0;
+        final net = Net(
+          client: MockClient((_) async {
+            inFlight++;
+            peak = peak > inFlight ? peak : inFlight;
+            await Future<void>.delayed(const Duration(milliseconds: 5));
+            inFlight--;
+            return http.Response(pubBody(['1.0.0']), 200);
+          }),
+        );
+
+        final report = await refreshAll(s, net, concurrency: 4);
+
+        expect(report.refreshed, 8);
+        expect(peak, greaterThan(1));
+        expect(peak, lessThanOrEqualTo(4));
+      },
+    );
+
+    test('a rate limit under concurrency stops new dequeues while in-flight '
+        'work still lands', () async {
+      final s = _store();
+      final a = s.upsertWatch(WatchKind.pub, 'aaa');
+      final b = s.upsertWatch(WatchKind.pub, 'bbb');
+      final c = s.upsertWatch(WatchKind.pub, 'ccc');
+      final d = s.upsertWatch(WatchKind.pub, 'ddd');
+      final requestedPaths = <String>[];
+      final net = Net(
+        client: MockClient((req) async {
+          requestedPaths.add(req.url.path);
+          if (req.url.path.endsWith('/aaa')) {
+            // Resolves after 'bbb' has already thrown and set the stop
+            // flag, so this proves an already-in-flight request that
+            // happens to finish later still keeps its data -- the pool
+            // doesn't cancel or discard work in progress when it stops.
+            await Future<void>.delayed(const Duration(milliseconds: 20));
+            return http.Response(pubBody(['1.0.0']), 200);
+          }
+          // 'bbb' rate-limits immediately (no delay), so its exception
+          // sets the stop flag well before 'aaa' resolves.
+          return http.Response('rate limited', 429);
+        }),
+      );
+
+      final report = await refreshAll(s, net, concurrency: 2);
+
+      expect(report.rateLimited, isTrue);
+      // 'aaa' was already in flight when the stop flag was set and still
+      // completes successfully, keeping its data and counting normally.
+      expect(report.refreshed, 1);
+      expect(report.failed, 0);
+      expect(s.watchById(a)!.lastError, isNull);
+      expect(s.releasesFor(a), isNotEmpty);
+      // 'bbb' is the watch whose own request hit the rate limit -- part of
+      // the retry set, stale rather than errored.
+      expect(s.watchById(b)!.lastError, contains('rate limit'));
+      // 'ccc' and 'ddd' were never dequeued at all once the pool stopped,
+      // and get the same stale message.
+      expect(s.watchById(c)!.lastError, contains('rate limit'));
+      expect(s.watchById(d)!.lastError, contains('rate limit'));
+      expect(
+        requestedPaths.where((p) => p.endsWith('/ccc') || p.endsWith('/ddd')),
+        isEmpty,
+      );
+    });
+
+    test(
+      'one watch failing under concurrency does not affect the others',
+      () async {
+        final s = _store();
+        final a = s.upsertWatch(WatchKind.pub, 'aaa');
+        final bad = s.upsertWatch(WatchKind.pub, 'bad');
+        final c = s.upsertWatch(WatchKind.pub, 'ccc');
+        final net = Net(
+          client: MockClient((req) async {
+            if (req.url.path.endsWith('/bad')) {
+              return http.Response('no such package', 404);
+            }
+            return http.Response(pubBody(['1.0.0']), 200);
+          }),
+        );
+
+        final report = await refreshAll(s, net, concurrency: 3);
+
+        expect(report.rateLimited, isFalse);
+        expect(report.refreshed, 2);
+        expect(report.failed, 1);
+        expect(s.watchById(bad)!.lastError, contains('404'));
+        expect(s.watchById(a)!.lastError, isNull);
+        expect(s.watchById(c)!.lastError, isNull);
+        expect(s.releasesFor(a), isNotEmpty);
+        expect(s.releasesFor(c), isNotEmpty);
+      },
+    );
+
+    test(
+      'result counts do not depend on completion order under concurrency',
+      () async {
+        Future<RefreshReport> runWith(List<int> delaysMs) async {
+          final s = _store();
+          for (var i = 0; i < delaysMs.length; i++) {
+            s.upsertWatch(WatchKind.pub, 'pkg$i');
+          }
+          final net = Net(
+            client: MockClient((req) async {
+              final i = int.parse(req.url.path.split('pkg').last);
+              await Future<void>.delayed(Duration(milliseconds: delaysMs[i]));
+              return http.Response(pubBody(['1.0.0', '2.0.0']), 200);
+            }),
+          );
+          return refreshAll(s, net, concurrency: delaysMs.length);
+        }
+
+        // Same five watches, dequeued in the same order (0..4) both times --
+        // only the order in which their responses *complete* is reversed
+        // between the two runs. refreshed/failed/newReleases are plain
+        // accumulation with no await between reading and writing them, so
+        // completion order must not change the totals.
+        final ascending = await runWith([0, 5, 10, 15, 20]);
+        final descending = await runWith([20, 15, 10, 5, 0]);
+
+        expect(ascending.refreshed, 5);
+        expect(ascending.failed, 0);
+        expect(ascending.newReleases, 10);
+        expect(descending.refreshed, ascending.refreshed);
+        expect(descending.failed, ascending.failed);
+        expect(descending.newReleases, ascending.newReleases);
+      },
+    );
   });
 }
