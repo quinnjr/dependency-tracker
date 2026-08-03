@@ -21,6 +21,7 @@ Net netReturning(String body, {void Function(Uri)? spy}) => Net(
 );
 
 void main() {
+  registryEdgeTests();
   group('url construction', () {
     test('escapes an npm scope', () {
       expect(
@@ -415,4 +416,56 @@ void main() {
       throwsA(isA<NetException>().having((e) => e.status, 'status', 404)),
     );
   });
+}
+
+// Arms the fixtures never took: the non-registry kinds, and the homepage
+// fallback when a package declares no repository.
+void registryEdgeTests() {
+  test('a github or rss watch is rejected as not a package registry', () {
+    // fetchRegistry is reachable only through fetchWatch, which routes these
+    // two elsewhere — so this is a programming-error guard, and it should
+    // name the parameter rather than fail obscurely if the switch drifts.
+    for (final kind in [WatchKind.github, WatchKind.rss]) {
+      expect(
+        () => fetchRegistry(netReturning('{}'), w(kind, 'x')),
+        throwsA(isA<ArgumentError>()),
+        reason: '$kind is not a registry',
+      );
+    }
+  });
+
+  test('pub falls back to the homepage when there is no repository', () async {
+    // Older pubspecs predate the `repository` field, so `homepage` is the
+    // only place the GitHub repo can be learned — and without it the watch
+    // never gets release notes.
+    const body = '''
+{
+  "name": "http",
+  "latest": {"version": "1.0.0"},
+  "versions": [
+    {"version": "1.0.0", "published": "2024-06-01T10:00:00.000Z",
+     "pubspec": {"homepage": "https://github.com/dart-lang/http"}}
+  ]
+}''';
+    final r = await fetchRegistry(netReturning(body), w(WatchKind.pub, 'http'));
+    expect(r.repoUrl, 'https://github.com/dart-lang/http');
+  });
+
+  test(
+    'crates falls back to the homepage when there is no repository',
+    () async {
+      const body = '''
+{
+  "crate": {"homepage": "https://github.com/serde-rs/serde"},
+  "versions": [
+    {"num": "1.0.0", "created_at": "2024-06-01T10:00:00.000Z"}
+  ]
+}''';
+      final r = await fetchRegistry(
+        netReturning(body),
+        w(WatchKind.crates, 'serde'),
+      );
+      expect(r.repoUrl, 'https://github.com/serde-rs/serde');
+    },
+  );
 }

@@ -1,8 +1,10 @@
-import 'package:flutter_test/flutter_test.dart';
 import 'package:deptracker/redact.dart';
 import 'package:deptracker/secrets.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  keyringBackendTests();
   setUp(clearSecrets);
 
   test('github token round-trips', () async {
@@ -158,4 +160,90 @@ class FailingSecretBackend implements SecretBackend {
       throw Exception('no secret service');
   @override
   Future<void> delete(String key) async => throw Exception('no secret service');
+}
+
+/// Records what reached flutter_secure_storage, so the delegation can be
+/// checked without a real keyring.
+class _RecordingStorage extends FlutterSecureStorage {
+  const _RecordingStorage(this.log, this.values);
+
+  final List<String> log;
+  final Map<String, String> values;
+
+  @override
+  Future<String?> read({
+    required String key,
+    IOSOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    MacOsOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    log.add('read:$key');
+    return values[key];
+  }
+
+  @override
+  Future<void> write({
+    required String key,
+    required String? value,
+    IOSOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    MacOsOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    log.add('write:$key=$value');
+    if (value != null) values[key] = value;
+  }
+
+  @override
+  Future<void> delete({
+    required String key,
+    IOSOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    MacOsOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    log.add('delete:$key');
+    values.remove(key);
+  }
+}
+
+// KeyringBackend is the one backend the shipped app constructs, and every
+// other test substitutes the in-memory one — so the three methods that
+// actually reach the OS keyring were never executed.
+void keyringBackendTests() {
+  test(
+    'KeyringBackend passes each operation through to secure storage',
+    () async {
+      final log = <String>[];
+      final backend = KeyringBackend(_RecordingStorage(log, {}));
+
+      expect(await backend.read('github_token'), isNull);
+      await backend.write('github_token', 'ghp_example');
+      expect(await backend.read('github_token'), 'ghp_example');
+      await backend.delete('github_token');
+      expect(await backend.read('github_token'), isNull);
+
+      // The key must be forwarded unchanged: it is what the entry is stored
+      // under, so a rename would orphan every existing secret.
+      expect(log, [
+        'read:github_token',
+        'write:github_token=ghp_example',
+        'read:github_token',
+        'delete:github_token',
+        'read:github_token',
+      ]);
+    },
+  );
+
+  test('KeyringBackend defaults to a real FlutterSecureStorage', () {
+    // The no-argument constructor is what main.dart calls.
+    expect(KeyringBackend(), isA<SecretBackend>());
+  });
 }

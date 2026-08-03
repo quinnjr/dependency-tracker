@@ -39,6 +39,7 @@ int seedWatch({String name = 'http', String pinned = '1.2.0'}) {
 }
 
 void main() {
+  validationRejectionTests();
   setUp(() {
     store = Store.openInMemory();
   });
@@ -686,5 +687,66 @@ void main() {
     ].join();
     expect(encoded.toLowerCase(), isNot(contains('token')));
     expect(encoded.toLowerCase(), isNot(contains('bearer')));
+  });
+}
+
+// Rejection arms an agent can actually hit by sending a wrong-typed or
+// missing argument. Each must name the parameter, because the message is the
+// only thing the calling agent can act on.
+void validationRejectionTests() {
+  test('a wrong-typed string parameter is rejected by name, not as a raw '
+      'TypeError', () async {
+    final id = seedWatch(name: 'http');
+    // Every one of these is declared `"type": "string"` in the schema, so a
+    // number is a client bug the server should describe rather than crash on.
+    final cases = <String, Map<String, Object?>>{
+      'list_watches': {'filter': 1},
+      'get_release_notes': {'id': id, 'newer_than': 2},
+      'mark_read': {'id': id, 'version': 3},
+    };
+    for (final entry in cases.entries) {
+      await expectLater(
+        call(entry.key, entry.value),
+        throwsA(isA<ArgumentError>()),
+        reason: entry.key,
+      );
+    }
+  });
+
+  test('an unknown kind is rejected by name', () async {
+    await expectLater(
+      call('list_watches', {'kind': 'maven'}),
+      throwsA(
+        isA<ArgumentError>().having(
+          (e) => e.toString(),
+          'message',
+          contains('maven'),
+        ),
+      ),
+    );
+    await expectLater(
+      call('add_watch', {'kind': 'maven', 'name': 'x'}),
+      throwsA(isA<ArgumentError>()),
+    );
+    // A non-String kind takes a different arm from an unrecognised name, and
+    // must still name the parameter rather than surface a cast failure.
+    await expectLater(
+      call('add_watch', {'kind': 1, 'name': 'x'}),
+      throwsA(isA<ArgumentError>()),
+    );
+  });
+
+  test('search_watches requires a query', () async {
+    await expectLater(
+      call('search_watches', const {}),
+      throwsA(isA<ArgumentError>()),
+    );
+  });
+
+  test('add_watch requires a name', () async {
+    await expectLater(
+      call('add_watch', {'kind': 'pub'}),
+      throwsA(isA<ArgumentError>()),
+    );
   });
 }

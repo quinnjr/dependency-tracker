@@ -39,6 +39,18 @@ void main() {
       );
       expect(versionFromGithubEntry(e), 'v3.1.0');
     });
+    test('falls back to the tag in a /tree/ url, which the tags feed uses', () {
+      // The tags feed links entries as /tree/<tag> rather than
+      // /releases/tag/<tag>, so a repo that publishes tags but not releases
+      // depends entirely on this arm to get a version at all.
+      const e = FeedEntry(
+        id: 'urn:opaque',
+        title: 'Some marketing headline',
+        url: 'https://github.com/a/b/tree/v3.1.0',
+      );
+      expect(versionFromGithubEntry(e), 'v3.1.0');
+    });
+
     test('falls back to a version-shaped title', () {
       const e = FeedEntry(id: 'urn:opaque', title: '1.2.2');
       expect(versionFromGithubEntry(e), '1.2.2');

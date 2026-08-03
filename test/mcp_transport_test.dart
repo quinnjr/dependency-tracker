@@ -30,6 +30,7 @@ Future<http.Response> post(
 );
 
 void main() {
+  transportFailureTests();
   setUp(() async {
     transport = McpTransport(
       onSession: () => buildMcpServer([
@@ -407,4 +408,80 @@ void main() {
       expect(jsonDecode(file.readAsStringSync())['port'], 2222);
     });
   });
+}
+
+// Failure arms of the front door: a session factory that throws, the session
+// cap, and a GET naming a session that does not exist.
+void transportFailureTests() {
+  test(
+    'a session factory that throws becomes a 500, not a dropped socket',
+    () async {
+      // buildMcpServer runs per session and touches the Store; if it throws,
+      // the client must get an answer rather than a connection reset.
+      final broken = McpTransport(
+        onSession: () => throw StateError('session factory exploded'),
+        bearerToken: token,
+      );
+      final port = await broken.start();
+      addTearDown(broken.stop);
+
+      final r = await http.post(
+        Uri.parse('http://127.0.0.1:$port$mcpPath'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode(
+          rpc('initialize', params: {'protocolVersion': mcpProtocolVersion}),
+        ),
+      );
+      expect(r.statusCode, 500);
+      // The failure text is redacted on the way out, like every other body.
+      expect(r.body, isNotEmpty);
+    },
+  );
+
+  test('the session cap refuses further sessions rather than growing without '
+      'limit', () async {
+    final clients = <McpTestClient>[];
+    for (var i = 0; i < mcpMaxSessions; i++) {
+      final c = McpTestClient(endpoint, bearer: token);
+      await c.initialize();
+      clients.add(c);
+    }
+    addTearDown(() async {
+      for (final c in clients) {
+        await c.close();
+      }
+    });
+    expect(transport.sessionIds, hasLength(mcpMaxSessions));
+
+    final overflow = await http.post(
+      endpoint,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
+      body: jsonEncode(
+        rpc('initialize', params: {'protocolVersion': mcpProtocolVersion}),
+      ),
+    );
+    expect(overflow.statusCode, 503);
+  });
+
+  test(
+    'a GET naming an unknown session is 404, not a stream to nowhere',
+    () async {
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final request = await client.getUrl(endpoint);
+      request.headers.set('Authorization', 'Bearer $token');
+      request.headers.set('Accept', 'text/event-stream');
+      request.headers.set(sessionHeader, 'no-such-session');
+      final response = await request.close();
+
+      expect(response.statusCode, 404);
+      await response.drain<void>();
+    },
+  );
 }

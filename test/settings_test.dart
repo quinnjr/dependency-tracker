@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:deptracker/scanner.dart';
 import 'package:deptracker/secrets.dart';
@@ -10,6 +11,21 @@ import 'package:deptracker/ui/settings.dart';
 /// `registerSecret` before this write is attempted, so the value is
 /// redactable at the moment of failure — the only question is whether the
 /// caller applies `redact()` before rendering it.
+/// A backend that fails every read the way an absent secret service does, so
+/// the pane's PAT probe takes its KeyringUnavailable arm.
+class _UnavailableBackend implements SecretBackend {
+  @override
+  Future<String?> read(String key) async =>
+      throw Exception('no secret service');
+
+  @override
+  Future<void> write(String key, String value) async =>
+      throw Exception('no secret service');
+
+  @override
+  Future<void> delete(String key) async {}
+}
+
 class _ThrowingBackend implements SecretBackend {
   @override
   Future<String?> read(String key) async => null;
@@ -45,6 +61,7 @@ Widget pane({int? mcpPort = 51234, Object? mcpError}) => MaterialApp(
 );
 
 void main() {
+  settingsEdgeTests();
   setUp(() {
     store = Store.openInMemory();
     secrets = Secrets(MemorySecretBackend());
@@ -215,4 +232,70 @@ void main() {
       expect(find.textContaining('«redacted»'), findsOneWidget);
     },
   );
+}
+
+// The three remaining branches: a keyring that fails while probing for a
+// stored PAT, copying the revealed MCP token, and the pre-startup state.
+void settingsEdgeTests() {
+  testWidgets('a keyring failure while probing for a stored PAT is swallowed, '
+      'not shown twice', (tester) async {
+    // The MCP error banner already explains an unavailable keyring, so this
+    // probe must not surface a second, redundant error — but it also must not
+    // take the pane down.
+    secrets = Secrets(_UnavailableBackend());
+
+    await tester.pumpWidget(
+      pane(mcpPort: null, mcpError: KeyringUnavailable('no secret service')),
+    );
+    await tester.pumpAndSettle();
+
+    // The pane still renders, and the single explanation is the banner's.
+    expect(find.textContaining('GitHub'), findsWidgets);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('the mcp token can be copied to the clipboard', (tester) async {
+    // The token is never displayed until asked for, so copy is the only
+    // practical way to get it into an agent's config.
+    final copied = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied.add((call.arguments as Map)['text'] as String);
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+
+    await tester.pumpWidget(pane());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Reveal token'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithIcon(IconButton, Icons.copy));
+    await tester.pumpAndSettle();
+
+    expect(copied, hasLength(1));
+    expect(copied.single, isNotEmpty);
+    // What lands on the clipboard must be the token itself, not a label.
+    expect(copied.single, await secrets.mcpToken());
+  });
+
+  testWidgets('before the server has a port, the pane says it is starting', (
+    tester,
+  ) async {
+    // mcpPort null with no error is the window between launch and bind.
+    await tester.pumpWidget(pane(mcpPort: null));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Starting…'), findsOneWidget);
+  });
 }

@@ -10,6 +10,7 @@ ParsedDep dep(List<ParsedDep> deps, String name) =>
     deps.firstWhere((d) => d.name == name);
 
 void main() {
+  errorAndLegacyTests();
   test('pubspec.lock yields resolved versions including transitives', () {
     final deps = parseManifest('pubspec.lock', fixture('pubspec.lock'));
     expect(dep(deps, 'http').version, '1.2.2');
@@ -305,5 +306,100 @@ void main() {
       () => parseManifest('package.json', 'not json at all'),
       throwsA(isA<FormatException>()),
     );
+  });
+}
+
+// Error paths and the legacy npm lockfile shape, none of which any fixture
+// reached. A parser's failure mode is as much a contract as its success one:
+// the scanner reports these strings to the user per file.
+void errorAndLegacyTests() {
+  test(
+    'malformed YAML is reported as a FormatException naming the problem',
+    () {
+      // The scanner surfaces this per-file rather than aborting a whole scan,
+      // so the message is user-visible.
+      expect(
+        () => parseManifest('pubspec.lock', 'packages:\n  bad: [unclosed\n'),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('invalid YAML'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test(
+    'malformed TOML is reported as a FormatException naming the problem',
+    () {
+      expect(
+        () => parseManifest('Cargo.lock', '[[package\nname = "x"'),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('invalid TOML'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test('malformed JSON in a package-lock is a FormatException', () {
+    expect(
+      () => parseManifest('package-lock.json', '{ not json'),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('a package-lock that is not an object is rejected', () {
+    expect(
+      () => parseManifest('package-lock.json', '[1, 2, 3]'),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('a legacy npm lockfile is read, including nested transitives', () {
+    // npm v1-v6 nested transitive deps inside their parent's own
+    // `dependencies` map instead of flattening them under `packages`. Both
+    // shapes still exist in the wild, and the legacy walk is recursive.
+    const legacy = '''
+{
+  "name": "app",
+  "lockfileVersion": 1,
+  "dependencies": {
+    "left-pad": {
+      "version": "1.3.0",
+      "dependencies": {
+        "nested-dep": {"version": "2.0.0"}
+      }
+    },
+    "typescript": {"version": "5.4.0", "dev": true},
+    "no-version": {"resolved": "https://example.com/x.tgz"}
+  }
+}''';
+    final deps = parseManifest('package-lock.json', legacy);
+    final byName = {for (final d in deps) d.name: d};
+
+    expect(byName.keys, containsAll(['left-pad', 'nested-dep', 'typescript']));
+    expect(byName['left-pad']!.version, '1.3.0');
+    expect(byName['left-pad']!.isResolved, isTrue);
+    // The nested entry proves the walk recurses rather than reading one level.
+    expect(byName['nested-dep']!.version, '2.0.0');
+    // `dev: true` marks a dev dependency; its absence must not.
+    expect(byName['typescript']!.isDevDep, isTrue);
+    expect(byName['left-pad']!.isDevDep, isFalse);
+    // An entry with no version string is skipped rather than stored empty.
+    expect(byName.containsKey('no-version'), isFalse);
+  });
+
+  test('a legacy lockfile with a non-map dependency entry is skipped, not '
+      'thrown on', () {
+    const odd = '''
+{"lockfileVersion": 1, "dependencies": {"weird": "1.0.0", "ok": {"version": "2.0.0"}}}''';
+    final deps = parseManifest('package-lock.json', odd);
+    expect(deps.map((d) => d.name), ['ok']);
   });
 }

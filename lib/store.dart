@@ -177,10 +177,18 @@ class Store extends ChangeNotifier implements EtagCache {
         // statements, or a future unique constraint conflicts where
         // ON CONFLICT(kind, name) does not catch it. `.first` would raise a
         // bare "No element" naming neither the kind nor the name.
+        //
+        // No test can reach it: both statements are synchronous sqlite3 FFI
+        // calls with no await between them, so nothing can delete the row in
+        // the gap. Excluded from coverage rather than deleted, because the
+        // day a second unique constraint is added it stops being unreachable
+        // and starts being the only thing that names the offending watch.
+        // coverage:ignore-start
         throw StateError(
           'upsertWatch: insert conflicted but no ${kind.name} row named '
           '"$name" exists',
         );
+        // coverage:ignore-end
       }
       id = existing.first['id'] as int;
     }
@@ -431,8 +439,15 @@ class Store extends ChangeNotifier implements EtagCache {
       }
       _db.execute('COMMIT');
     } catch (_) {
+      // Unreachable from the public API: reaching the UPDATE means the
+      // database is open and writable, and a store closed beforehand fails at
+      // BEGIN instead. It stays because a partially applied batch would leave
+      // some watches flagged stale and others not, which is exactly the
+      // all-or-nothing property refreshAll reports as staleMarkingFailed.
+      // coverage:ignore-start
       _db.execute('ROLLBACK');
       rethrow;
+      // coverage:ignore-end
     }
     notifyListeners();
   }
