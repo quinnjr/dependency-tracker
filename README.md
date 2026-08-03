@@ -55,3 +55,26 @@ On Linux, a secret service such as gnome-keyring must be running; see the Secret
 ```
 flutter test
 ```
+
+On Windows the tests load the SQLite DLL vendored under
+`third_party/sqlite3/windows-x64/`, because `sqlite3_flutter_libs` supplies a
+library to the built app but not to the Dart VM that runs `flutter test`. See
+the README there.
+
+## Upgrading on Linux from a build before 1.0.0
+
+The application id changed from `ai.lexmata.deptracker` to
+`dev.quinnjr.deptracker`, so the Flatpak app id and the GTK application id
+agree and the window matches its `.desktop` entry.
+
+Login keyring entries are namespaced by that id, so the previous ones are
+invisible to the new build:
+
+- **Re-enter your GitHub token** in Settings. Without it, refreshes fall back
+  to unauthenticated rate limits rather than failing loudly.
+- **Re-copy the MCP token** into any agent configured against this app. The
+  token is regenerated on first launch, so an agent still presenting the old
+  one gets `401 Unauthorized`.
+
+The watch database is untouched — it lives under a path derived from the app
+*name*, not the app id.

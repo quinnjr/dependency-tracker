@@ -94,13 +94,22 @@ final DateTime _publishedAtFallback = DateTime.utc(1970);
 /// even against a low clean version like `"0.0.1"` — because a string that
 /// isn't a real version can never be the "genuinely newest" one. This is the
 /// intended guarantee, not an accidental side effect of the tiebreak.
+///
+/// Two *mutually* malformed strings compare equal under `compareVersions`, and
+/// Dart's [List.sort] is not stable, so without a final tiebreak their order
+/// would be genuinely undefined — `.last` could flip between runs on identical
+/// input, and `.last` is what becomes `lastSeenVersion`. The string comparison
+/// below is arbitrary but total, which is the point: it makes the result
+/// reproducible rather than meaningful.
 void _sortByPublishedAt(List<VersionInfo> versions) {
   versions.sort((a, b) {
     final timeCmp = (a.publishedAt ?? _publishedAtFallback).compareTo(
       b.publishedAt ?? _publishedAtFallback,
     );
     if (timeCmp != 0) return timeCmp;
-    return compareVersions(a.version, b.version);
+    final versionCmp = compareVersions(a.version, b.version);
+    if (versionCmp != 0) return versionCmp;
+    return a.version.compareTo(b.version);
   });
 }
 

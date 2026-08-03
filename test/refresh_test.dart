@@ -29,6 +29,8 @@ Net pubNet(List<String> versions) =>
 void main() {
   setUp(clearSecrets);
 
+  poolTests();
+
   test(
     'first fetch marks everything at or below the pinned version read',
     () async {
@@ -676,5 +678,116 @@ void main() {
         expect(descending.newReleases, ascending.newReleases);
       },
     );
+  });
+}
+
+// --- properties the bounded worker pool has to hold -------------------------
+//
+// The pool's counts are aggregate, so a bug that double-dispatches one watch
+// and skips another cancels out in `refreshed`. These pin the properties the
+// counts cannot see.
+
+void _seed(Store s, int count) {
+  for (var i = 0; i < count; i++) {
+    s.upsertWatch(WatchKind.pub, 'pkg$i');
+  }
+}
+
+void poolTests() {
+  test('refreshAll rejects a concurrency below 1 instead of silently doing '
+      'nothing', () async {
+    final s = _store();
+    _seed(s, 3);
+    await expectLater(
+      refreshAll(s, pubNet(['1.0.0']), concurrency: 0),
+      throwsA(isA<ArgumentError>()),
+    );
+    // The watches are untouched: the rejection happens before any work.
+    expect(s.watches().every((w) => w.lastCheckedAt == null), isTrue);
+    s.close();
+  });
+
+  test('every watch is fetched exactly once under concurrency', () async {
+    final s = _store();
+    _seed(s, 8);
+    final paths = <String>[];
+    final net = Net(
+      client: MockClient((req) async {
+        paths.add(req.url.path);
+        return http.Response(pubBody(['1.0.0']), 200);
+      }),
+    );
+
+    final report = await refreshAll(s, net, concurrency: 4);
+
+    expect(report.refreshed, 8);
+    // The multiset, not the count: a double-dispatch paired with a skip leaves
+    // `refreshed` at 8 and would pass a count-only assertion.
+    expect(paths.length, 8);
+    expect(paths.toSet().length, 8, reason: 'a watch was fetched twice');
+    s.close();
+  });
+
+  test('onProgress is monotonic and reaches the total', () async {
+    final s = _store();
+    _seed(s, 8);
+    final seen = <int>[];
+    await refreshAll(
+      s,
+      pubNet(['1.0.0']),
+      concurrency: 4,
+      onProgress: (done, total) {
+        expect(total, 8);
+        seen.add(done);
+      },
+    );
+    expect(seen, List<int>.generate(8, (i) => i + 1));
+    s.close();
+  });
+
+  test('the watch that hit the rate limit keeps its own error rather than the '
+      'generic unattempted message', () async {
+    final s = _store();
+    _seed(s, 6);
+    final net = Net(
+      client: MockClient((req) async {
+        if (req.url.path.endsWith('/pkg0')) {
+          return http.Response('slow down there', 429);
+        }
+        return http.Response(pubBody(['1.0.0']), 200);
+      }),
+    );
+
+    final report = await refreshAll(s, net, concurrency: 1);
+    expect(report.rateLimited, isTrue);
+
+    final limited = s.watches().firstWhere((w) => w.name == 'pkg0');
+    // Its 429 detail is the only record of which host stopped the run, so it
+    // must survive markUnattemptedStale.
+    expect(limited.lastError, isNot(contains('not yet retried')));
+    expect(limited.lastError, contains('429'));
+    // And it must not claim a freshness it does not have.
+    expect(limited.lastCheckedAt, isNull);
+    s.close();
+  });
+
+  test('a store closed mid-refresh under the default pool still returns a '
+      'report rather than throwing', () async {
+    final s = _store();
+    _seed(s, 8);
+    var served = 0;
+    final net = Net(
+      client: MockClient((_) async {
+        served++;
+        if (served == 2) s.close();
+        return http.Response(pubBody(['1.0.0']), 200);
+      }),
+    );
+
+    // The bookkeeping writes inside the per-watch catch used to escape
+    // Future.wait, throwing away the totals for every watch that had already
+    // succeeded and committed.
+    final report = await refreshAll(s, net);
+    expect(report, isA<RefreshReport>());
   });
 }

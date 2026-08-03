@@ -20,8 +20,13 @@ release artifact — the packaged Windows app gets its DLL from
 | Version | 3.53.4 |
 | Source | <https://sqlite.org/2026/sqlite-dll-win-x64-3530400.zip> |
 | Archive SHA-256 | `8b959b7eff4a81f6a62fc3468f9273e5cfe78d4a927e62215aed231b654fb104` |
-| `sqlite3.dll` SHA-256 | `ab57d0437795ecc757cb693f32ea224173fa9856594d95cfa6b5033e645cd1ec` |
+| `sqlite3.dll` SHA-256 | see `sqlite3.dll.sha256` |
 | Architecture | x86-64 |
+
+The DLL's checksum lives in `sqlite3.dll.sha256` rather than in this prose,
+because CI verifies it (`sha256sum -c`) before running the Windows tests. A
+hash recorded only in a README is documentation; a swapped binary is not
+reviewable in a diff, so the check has to be machine-run to be worth anything.
 
 The version matches the SQLite that `sqlite3_flutter_libs` links into the app,
 so the tests exercise the same engine the application uses. That matters for the
@@ -32,9 +37,15 @@ SQLite is in the public domain: <https://sqlite.org/copyright.html>.
 ## Updating
 
 Download the `sqlite-dll-win-x64-<version>.zip` for the version that
-`sqlite3_flutter_libs` bundles, replace `sqlite3.dll`, and update the version and
-checksums above. Verify the download before committing it:
+`sqlite3_flutter_libs` bundles, replace `sqlite3.dll`, and update the version
+and the archive checksum above. Verify the download, then regenerate the
+checksum file CI reads:
 
 ```sh
 sha256sum sqlite-dll-win-x64-<version>.zip
+sha256sum sqlite3.dll > sqlite3.dll.sha256
 ```
+
+`test/store_test.dart` asserts the loaded SQLite is at least 3.35, so a DLL
+old enough to break `upsertWatch`'s `RETURNING` fails the suite rather than
+failing at runtime.

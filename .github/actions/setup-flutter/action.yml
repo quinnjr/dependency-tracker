@@ -1,0 +1,29 @@
+name: Set up Flutter
+description: >-
+  Installs the one Flutter version this project builds with and fetches
+  dependencies.
+
+# The SDK version lives here and only here. It used to be an env var duplicated
+# across ci.yml and release.yml, which is the drift that actually bites: CI is
+# what you look at daily, release runs on a tag months later, and bumping one
+# without the other ships a release built on an SDK that CI never tested —
+# with everything still green.
+inputs:
+  flutter-version:
+    description: Flutter SDK version to install.
+    required: false
+    default: 3.44.6
+
+runs:
+  using: composite
+  steps:
+    # Pinned to a commit rather than the mutable @v2 tag. This is a
+    # third-party action, and in release.yml it runs in a job that can publish
+    # releases; whoever controls the tag would otherwise control that job.
+    - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+      with:
+        flutter-version: ${{ inputs.flutter-version }}
+        channel: stable
+        cache: true
+    - run: flutter pub get
+      shell: bash

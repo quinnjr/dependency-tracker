@@ -148,6 +148,58 @@ void main() {
       expect(r.versions.map((v) => v.version), ['nightly', '0.0.1']);
       expect(r.versions.last.version, '0.0.1');
     });
+
+    test(
+      'a malformed version loses the tie whichever order it arrives in',
+      () async {
+        // The mirror of the test above. That one lists the clean version first,
+        // so it proves the comparator was consulted in one direction only.
+        const body = '''
+{
+  "name": "http",
+  "latest": {"version": "0.0.1"},
+  "versions": [
+    {"version": "nightly", "published": "2024-06-01T10:00:00.000Z"},
+    {"version": "0.0.1", "published": "2024-06-01T10:00:00.000Z"}
+  ]
+}''';
+        final r = await fetchRegistry(
+          netReturning(body),
+          w(WatchKind.pub, 'http'),
+        );
+        expect(r.versions.last.version, '0.0.1');
+      },
+    );
+
+    test('two malformed versions tied on publishedAt sort reproducibly, not '
+        'by input order', () async {
+      // Both parse as malformed, so compareVersions returns 0 for the pair and
+      // Dart's unstable sort leaves the order undefined without a total
+      // tiebreak. `.last` becomes lastSeenVersion, so a flip between runs on
+      // identical input would be a real bug.
+      String bodyFor(List<String> order) =>
+          '''
+{
+  "name": "http",
+  "latest": {"version": "${order.last}"},
+  "versions": [
+    {"version": "${order[0]}", "published": "2024-06-01T10:00:00.000Z"},
+    {"version": "${order[1]}", "published": "2024-06-01T10:00:00.000Z"}
+  ]
+}''';
+      final forward = await fetchRegistry(
+        netReturning(bodyFor(['nightly', 'edge'])),
+        w(WatchKind.pub, 'http'),
+      );
+      final reversed = await fetchRegistry(
+        netReturning(bodyFor(['edge', 'nightly'])),
+        w(WatchKind.pub, 'http'),
+      );
+      expect(
+        forward.versions.map((v) => v.version).toList(),
+        reversed.versions.map((v) => v.version).toList(),
+      );
+    });
   });
 
   group('npm', () {

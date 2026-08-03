@@ -4,44 +4,64 @@ on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
 
+# Read by default. Only the job that actually publishes gets write, so the
+# three build jobs — which execute third-party build code from pub, cmake, and
+# flatpak-builder — never hold a token that can move a tag or overwrite an
+# asset.
 permissions:
-  contents: write
+  contents: read
 
 env:
-  FLUTTER_VERSION: 3.44.6
+  # The runtime the Flatpak targets. Bumping it means re-checking the glibc
+  # figures quoted on the `linux` job below, since those are derived from it.
+  GNOME_RUNTIME_VERSION: '50'
 
 jobs:
   verify:
-    name: Verify tag matches pubspec
+    name: Verify versions agree
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: version
-        name: Compare tag against pubspec version
+        name: Compare tag against pubspec and AppStream metadata
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
+
           pubspec="$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//' | cut -d+ -f1)"
           if [ "$tag" != "$pubspec" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match pubspec version $pubspec." \
                  "Bump pubspec.yaml or retag before releasing."
             exit 1
           fi
+
+          # The metainfo is a third copy of the version and it is user-visible:
+          # a stale <release> means software centres advertise the old version
+          # and never offer the update. Gate it the same way as the pubspec.
+          meta="packaging/linux/dev.quinnjr.deptracker.metainfo.xml"
+          if ! grep -q "<release version=\"$tag\"" "$meta"; then
+            echo "::error::$meta has no <release version=\"$tag\"> entry."
+            exit 1
+          fi
+
           echo "version=$tag" >> "$GITHUB_OUTPUT"
 
   linux:
     name: Linux (tarball and Flatpak)
     needs: verify
     # Pinned rather than ubuntu-latest on purpose. The Flatpak packages a
-    # bundle built here, so the binaries must link against a glibc no newer
-    # than the org.gnome.Platform//50 runtime's (2.42). This runner is 2.39;
-    # letting the label drift to a newer Ubuntu would silently produce a
-    # Flatpak that fails to start. The ldd gate below enforces it regardless.
+    # bundle built here, so these binaries must link against a glibc no newer
+    # than the org.gnome.Platform runtime's (2.42 for runtime 50). This runner
+    # is 2.39. Letting the label drift to a newer Ubuntu would silently
+    # produce a Flatpak that installs and then fails at launch; the ldd gate
+    # below is what actually enforces it.
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install build dependencies
         run: |
@@ -52,13 +72,7 @@ jobs:
             libsecret-1-dev libjsoncpp-dev \
             flatpak flatpak-builder
 
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-
-      - run: flutter pub get
+      - uses: ./.github/actions/setup-flutter
       - run: flutter build linux --release
 
       - name: Package tarball
@@ -73,7 +87,9 @@ jobs:
           set -euo pipefail
           flatpak remote-add --user --if-not-exists \
             flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y flathub org.gnome.Platform//50 org.gnome.Sdk//50
+          flatpak install --user -y flathub \
+            "org.gnome.Platform//$GNOME_RUNTIME_VERSION" \
+            "org.gnome.Sdk//$GNOME_RUNTIME_VERSION"
 
       - name: Build Flatpak
         run: |
@@ -85,26 +101,51 @@ jobs:
             "dev.quinnjr.deptracker-$v.flatpak" dev.quinnjr.deptracker
 
       - name: Verify Flatpak libraries resolve
-        # A Flutter bundle built against a newer glibc than the runtime ships
-        # will install cleanly and only fail at launch. Catch that here rather
-        # than shipping a Flatpak that cannot start.
+        # A bundle built against a newer glibc than the runtime ships installs
+        # cleanly and only fails at launch, so this gate is the real guard
+        # behind the ubuntu-24.04 pin above.
+        #
+        # The enumeration runs INSIDE the sandbox. Globbing on the runner
+        # would match nothing (/app exists only in the sandbox), bash would
+        # pass the literal pattern to ldd, ldd would answer "No such file or
+        # directory" — which does not contain "not found" — and the gate would
+        # pass having checked nothing. The plugin .so files are exactly the
+        # ones that carry the too-new glibc reference, so skipping them would
+        # defeat the entire check.
         run: |
           set -euo pipefail
           v="${{ needs.verify.outputs.version }}"
           flatpak install --user -y "dev.quinnjr.deptracker-$v.flatpak"
+
+          libs="$(flatpak run --command=sh dev.quinnjr.deptracker -c \
+            'ls /app/deptracker/deptracker /app/deptracker/lib/*.so')"
+          count="$(printf '%s\n' "$libs" | grep -c . || true)"
+          # The executable plus at least one plugin. A layout change that
+          # emptied this list must fail loudly rather than pass vacuously.
+          if [ "$count" -lt 2 ]; then
+            echo "::error::expected the executable and its plugins, found $count:"
+            printf '%s\n' "$libs"
+            exit 1
+          fi
+          echo "checking $count libraries"
+
           missing=0
-          for lib in /app/deptracker/deptracker /app/deptracker/lib/*.so; do
-            if flatpak run --command=ldd dev.quinnjr.deptracker "$lib" 2>&1 \
-                 | grep -q 'not found'; then
+          for lib in $libs; do
+            if ! out="$(flatpak run --command=ldd dev.quinnjr.deptracker "$lib" 2>&1)"; then
+              echo "::error::ldd failed for $lib"
+              printf '%s\n' "$out"
+              missing=1
+              continue
+            fi
+            if printf '%s\n' "$out" | grep -q 'not found'; then
               echo "::error::Unresolved libraries in $lib"
-              flatpak run --command=ldd dev.quinnjr.deptracker "$lib" 2>&1 \
-                | grep 'not found' || true
+              printf '%s\n' "$out" | grep 'not found'
               missing=1
             fi
           done
           [ "$missing" -eq 0 ] || exit 1
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux
           path: |
@@ -116,26 +157,24 @@ jobs:
     name: macOS
     needs: verify
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-
-      - run: flutter pub get
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-flutter
       - run: flutter build macos --release
 
       - name: Package app
         run: |
           set -euo pipefail
           v="${{ needs.verify.outputs.version }}"
-          app="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -1)"
+          # -print -quit rather than `| head -1`: under pipefail, head closing
+          # the pipe early kills find with SIGPIPE (exit 141) and set -e ends
+          # the step before the guard below can explain what went wrong.
+          app="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' -print -quit)"
           [ -n "$app" ] || { echo "::error::No .app produced"; exit 1; }
           ditto -c -k --sequesterRsrc --keepParent "$app" "deptracker-$v-macos.zip"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macos
           path: deptracker-*-macos.zip
@@ -145,15 +184,10 @@ jobs:
     name: Windows
     needs: verify
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-
-      - run: flutter pub get
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-flutter
       - run: flutter build windows --release
 
       - name: Package archive
@@ -163,7 +197,7 @@ jobs:
           Compress-Archive -Path build/windows/x64/runner/Release/* `
             -DestinationPath "deptracker-$v-windows-x64.zip"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: windows
           path: deptracker-*-windows-x64.zip
@@ -173,8 +207,12 @@ jobs:
     name: Publish GitHub release
     needs: [verify, linux, macos, windows]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The only job that needs to write, and it runs no third-party build code.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
           merge-multiple: true
@@ -203,6 +241,19 @@ jobs:
 
           The macOS and Windows builds are unsigned, so Gatekeeper and
           SmartScreen will warn on first launch.
+
+          ### Upgrading on Linux from a build before 1.0.0
+
+          The application id changed from `ai.lexmata.deptracker` to
+          `dev.quinnjr.deptracker`. Secrets in the login keyring are namespaced
+          by that id, so the previous entries are not visible to this build:
+
+          - Re-enter your GitHub token in Settings.
+          - The MCP token is regenerated, so re-copy it into any agent that
+            connects to this app — an agent still sending the old token will
+            get `401 Unauthorized`.
+
+          Your watch database is unaffected.
           EOF
           sed -i "s/VERSION/$v/g" notes.md
           gh release create "$GITHUB_REF_NAME" \
