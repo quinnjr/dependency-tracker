@@ -292,10 +292,10 @@ packages:
     dependency: "direct main"
     description:
       name: mcp_sse_server
-      sha256: "47a024d415f1875188c70c28ecf82e017d7fccdc9fd29623b03e7e996c79c125"
+      sha256: afb4bc0d4cf509a51dfac70b5224dfb9fbd07b9fcfe6f636a87849e865bb2631
       url: "https://pub.dev"
     source: hosted
-    version: "0.2.0"
+    version: "0.2.1"
   meta:
     dependency: transitive
     description:

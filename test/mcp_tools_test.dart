@@ -333,6 +333,29 @@ void main() {
     },
   );
 
+  test('a watch is reachable by its own id and name even when another '
+      'registry watches the same package name', () async {
+    // Regression: the cross-check used to resolve `name` globally, and the
+    // resolver answers with the first matching WatchKind in enum order. So
+    // with `http` watched on both pub and npm it always answered "pub", and
+    // the npm watch's own id paired with its own correct name was rejected as
+    // referring to different watches. This is a multi-registry tracker —
+    // `http`, `path`, `uuid`, `crypto` and `requests` collide across
+    // ecosystems routinely — so every id-taking tool was unusable for them.
+    final pubId = store.upsertWatch(WatchKind.pub, 'http');
+    final npmId = store.upsertWatch(WatchKind.npm, 'http');
+    expect(pubId, isNot(npmId));
+
+    expect(
+      (await call('get_watch', {'id': npmId, 'name': 'http'}) as Map)['id'],
+      npmId,
+    );
+    expect(
+      (await call('get_watch', {'id': pubId, 'name': 'http'}) as Map)['id'],
+      pubId,
+    );
+  });
+
   test('get_watch rejects id and name that resolve to different watches, '
       'naming both rather than silently preferring id', () async {
     final id = seedWatch(name: 'http');
