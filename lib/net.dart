@@ -68,9 +68,22 @@ class _MemoryEtagCache implements EtagCache {
 }
 
 class Net {
-  Net({http.Client? client, this.concurrency = 8, EtagCache? cache})
-    : _client = client ?? http.Client(),
-      _cache = cache ?? _MemoryEtagCache();
+  Net({
+    http.Client? client,
+    this.concurrency = 8,
+    EtagCache? cache,
+    this.requestTimeout = defaultRequestTimeout,
+  }) : _client = client ?? http.Client(),
+       _cache = cache ?? _MemoryEtagCache();
+
+  /// Ceiling on a single registry request.
+  ///
+  /// Generous rather than tight: a cold pub.dev or a large Atom feed on a slow
+  /// link is normal, and turning that into a spurious per-watch error would be
+  /// worse than waiting. It exists to bound a hang, not to enforce latency.
+  static const Duration defaultRequestTimeout = Duration(seconds: 30);
+
+  final Duration requestTimeout;
 
   final http.Client _client;
   final int concurrency;
@@ -113,7 +126,23 @@ class Net {
 
       final http.Response response;
       try {
-        response = await _client.get(url, headers: sent);
+        // A registry that accepts the connection and then never answers —
+        // captive portal, half-open NAT mapping, wedged proxy — would
+        // otherwise park this worker forever. That is worse than a slow
+        // refresh: refreshAll awaits every worker, so one dead socket means
+        // the whole refresh never returns, the rate-limit stop never takes
+        // effect, and the UI's in-progress state never clears. Landing it in
+        // the per-watch catch instead records the failure on that watch and
+        // lets the rest finish.
+        response = await _client
+            .get(url, headers: sent)
+            .timeout(
+              requestTimeout,
+              onTimeout: () => throw NetException(
+                '${url.host}: no response within '
+                '${requestTimeout.inSeconds}s',
+              ),
+            );
       } on http.ClientException catch (e) {
         throw NetException('${url.host}: ${e.message}');
       } on Exception catch (e) {

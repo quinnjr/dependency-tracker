@@ -21,6 +21,13 @@ class RefreshReport {
   /// True when a rate limit stopped this refresh before every watch was
   /// attempted. The remaining, unattempted watches are left stale (their
   /// last_error explains why) rather than counted as failed.
+  ///
+  /// The watch that itself hit the limit is also excluded from [failed] — it
+  /// got no data, so counting it as a failure would blame the package for the
+  /// host's throttling. It keeps its own 429 error rather than the generic
+  /// stale message, since it is the only record of which host stopped the run.
+  /// So on a rate-limited run `refreshed + failed` does not account for every
+  /// watch that was attempted.
   final bool rateLimited;
 
   /// True when [rateLimited] is true but the best-effort write marking the
@@ -99,6 +106,14 @@ Future<RefreshReport> refreshAll(
   void Function(int done, int total)? onProgress,
   int concurrency = 8,
 }) async {
+  if (concurrency < 1) {
+    // Zero would build zero workers, so Future.wait([]) returns at once and
+    // the report reads refreshed: 0, failed: 0 — indistinguishable from "all
+    // up to date" while nothing was fetched. Rejecting matches how the MCP
+    // layer treats a limit below 1 rather than degrading quietly.
+    throw ArgumentError.value(concurrency, 'concurrency', 'must be at least 1');
+  }
+
   final targets = onlyWatchId == null
       ? store.watches()
       : [store.watchById(onlyWatchId)].whereType<Watch>().toList();
@@ -145,13 +160,27 @@ Future<RefreshReport> refreshAll(
       // malformed payload must not abort a refresh of three hundred packages.
       // redact() is belt-and-braces here — NetException already redacts, but a
       // FormatException from a registry payload does not.
-      store.setWatchMeta(
-        watch.id!,
-        lastError: redact(e.toString()),
-        lastCheckedAt: DateTime.now().toUtc(),
-      );
+      final isRateLimit = e is NetException && e.isRateLimit;
 
-      if (e is NetException && e.isRateLimit) {
+      // Best-effort, for the same reason markUnattemptedStale is: the report
+      // is the contract with the caller, and by this point the watches that
+      // already succeeded are committed. Letting a failed bookkeeping write
+      // escape here would propagate out of Future.wait and throw away the
+      // totals for every one of them.
+      try {
+        store.setWatchMeta(
+          watch.id!,
+          lastError: redact(e.toString()),
+          // A rate-limited watch is grouped with the ones never dequeued, so
+          // stamping it as checked would make it claim a freshness it does
+          // not have. setWatchMeta leaves a null lastCheckedAt untouched.
+          lastCheckedAt: isRateLimit ? null : DateTime.now().toUtc(),
+        );
+      } catch (_) {
+        // The watch keeps its previous error; the counts below still stand.
+      }
+
+      if (isRateLimit) {
         // A rate limit is a property of the host, not of one watch: issuing
         // ~300 more requests at full concurrency, each rejected, is the
         // "retrying in a loop" the spec forbids and is exactly the pattern a
@@ -183,13 +212,17 @@ Future<RefreshReport> refreshAll(
   await Future.wait(List.generate(workerCount, (_) => worker()));
 
   if (stopped) {
-    // Unattempted = every watch never dequeued (indices from nextIndex on,
-    // frozen once every worker observed `stopped` and returned) plus every
-    // watch that itself hit the rate limit — both groups got no data and
-    // both are retry candidates, not failures.
+    // Unattempted = every watch never dequeued: indices from nextIndex on,
+    // frozen once every worker observed `stopped` and returned.
+    //
+    // The watches that themselves hit the limit are deliberately NOT included,
+    // even though they also got no data. markUnattemptedStale overwrites
+    // last_error, and theirs is the only record of which host rate-limited
+    // this run and with what status — replacing it with "not yet retried"
+    // would destroy the one diagnostic worth having, and would claim they were
+    // never attempted when they were.
     final unattemptedIds = <int>{
       for (var i = nextIndex; i < targets.length; i++) targets[i].id!,
-      ...rateLimitedIds,
     };
 
     // Best-effort bookkeeping: the report below is the contract with the

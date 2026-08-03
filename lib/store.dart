@@ -26,9 +26,12 @@ class WatchCounts {
 /// in the open window with no extra plumbing.
 ///
 /// Mutators of UI-visible state (`watch`, `usage`, `release`, `scan_root`)
-/// call `notifyListeners()` exactly once per call. `meta` and `http_cache`
-/// are internal bookkeeping the UI never renders and are exempt from that
-/// rule — see the "meta and http cache" section below for the specifics.
+/// call `notifyListeners()` at most once per call: exactly once when state
+/// actually changed, and zero times on an explicit batch opt-out
+/// (`upsertWatch(notify: false)`) or a call with nothing to do
+/// (`markUnattemptedStale` with an empty id list). `meta` and `http_cache`
+/// are internal bookkeeping the UI never renders and are exempt from the rule
+/// entirely — see the "meta and http cache" section below for the specifics.
 class Store extends ChangeNotifier implements EtagCache {
   Store._(this._db);
 
@@ -148,9 +151,9 @@ class Store extends ChangeNotifier implements EtagCache {
   ///
   /// Uses `RETURNING id` to fold the insert and the id lookup into one
   /// round trip on the common (no-conflict) path; SQLite has supported
-  /// `RETURNING` since 3.35, and this app's bundled sqlite3 links 3.53.4 (see
-  /// the SQLite version check in `store_test.dart`), so the feature is safe
-  /// to rely on here. `ON CONFLICT DO NOTHING` means a conflicting insert
+  /// `RETURNING` since 3.35, and `store_test.dart` asserts the linked library
+  /// clears that floor on every platform, so the feature is safe to rely on
+  /// here. `ON CONFLICT DO NOTHING` means a conflicting insert
   /// returns no row, so the conflict path still needs a fallback `SELECT` to
   /// find the existing row's id — this only removes the second round trip
   /// for genuinely new watches, not for repeats.
@@ -165,12 +168,21 @@ class Store extends ChangeNotifier implements EtagCache {
     if (inserted.isNotEmpty) {
       id = inserted.first['id'] as int;
     } else {
-      id =
-          _db.select('SELECT id FROM watch WHERE kind = ? AND name = ?', [
-                kind.name,
-                name,
-              ]).first['id']
-              as int;
+      final existing = _db.select(
+        'SELECT id FROM watch WHERE kind = ? AND name = ?',
+        [kind.name, name],
+      );
+      if (existing.isEmpty) {
+        // Reachable only if the conflicting row vanished between the two
+        // statements, or a future unique constraint conflicts where
+        // ON CONFLICT(kind, name) does not catch it. `.first` would raise a
+        // bare "No element" naming neither the kind nor the name.
+        throw StateError(
+          'upsertWatch: insert conflicted but no ${kind.name} row named '
+          '"$name" exists',
+        );
+      }
+      id = existing.first['id'] as int;
     }
     if (notify) notifyListeners();
     return id;

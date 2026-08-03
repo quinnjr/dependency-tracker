@@ -2,6 +2,7 @@ import 'package:deptracker/models.dart';
 import 'package:deptracker/store.dart';
 import 'package:deptracker/versions.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqlite3/sqlite3.dart';
 
 /// Builds a resolved, non-dev [Usage] pinned to `1.0.0` in `pubspec.lock`,
 /// varying only [watchId] and [projectPath] — the two fields that actually
@@ -16,6 +17,24 @@ Usage _usage(int watchId, String projectPath) => Usage(
 );
 
 void main() {
+  // upsertWatch folds its insert and id lookup into one round trip with
+  // `RETURNING`, which SQLite only supports from 3.35. That floor was
+  // documented in store.dart as being covered by a check in this file, and
+  // the check did not exist — so the constraint rested on a citation.
+  //
+  // It runs on every platform deliberately: Linux and macOS take SQLite from
+  // the system (a floating apt/system library), and Windows takes it from the
+  // vendored DLL, so all three can drift below the floor independently.
+  test('the linked SQLite supports RETURNING, which upsertWatch requires', () {
+    expect(
+      sqlite3.version.versionNumber,
+      greaterThanOrEqualTo(3035000),
+      reason:
+          'upsertWatch uses RETURNING (SQLite >= 3.35); '
+          'loaded ${sqlite3.version.libVersion}',
+    );
+  });
+
   late Store store;
 
   setUp(() => store = Store.openInMemory());

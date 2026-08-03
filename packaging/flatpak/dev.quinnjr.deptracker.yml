@@ -6,7 +6,14 @@
 # here. Build it with:
 #
 #   flutter build linux --release
-#   flatpak-builder --force-clean build-dir packaging/flatpak/dev.quinnjr.deptracker.yml
+#   flatpak-builder --force-clean .flatpak-build packaging/flatpak/dev.quinnjr.deptracker.yml
+#
+# The bundle is copied as-is with no freshness check, so re-run the build above
+# first — otherwise this happily packages a stale one.
+#
+# Revisit if a Flutter SDK extension ever appears on Flathub: building in the
+# sandbox would remove the glibc coupling that the ubuntu-24.04 pin and the ldd
+# gate in .github/workflows/release.yml exist to manage.
 #
 # org.gnome.Platform is used rather than org.freedesktop.Platform because the
 # Flutter Linux shell links against GTK 3, which the freedesktop runtime does
@@ -29,8 +36,13 @@ finish-args:
   # flutter_secure_storage, which talks to the Secret Service API.
   - --talk-name=org.freedesktop.secrets
   # The app scans project manifests wherever the user keeps their repositories,
-  # and the directory picker can point anywhere under $HOME.
-  - --filesystem=home
+  # and the directory picker can point anywhere under $HOME. Read-only: the
+  # app only ever reads manifests, and its own writable state (the SQLite
+  # database, the MCP discovery file) lives under XDG paths that Flatpak
+  # redirects into ~/.var/app/dev.quinnjr.deptracker/ and can write without
+  # this grant. Read-write would put ~/.ssh and ~/.bashrc within reach of any
+  # bug in a parser fed by attacker-controlled registry payloads.
+  - --filesystem=home:ro
 
 modules:
   - name: deptracker

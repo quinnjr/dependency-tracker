@@ -45,6 +45,14 @@
     <release version="1.0.0" date="2026-08-03">
       <description>
         <p>Initial release.</p>
+        <p>
+          Upgrading from a build before 1.0.0 on Linux: the application id
+          changed, and login keyring entries are namespaced by it. Re-enter
+          your GitHub token in Settings, and re-copy the MCP token into any
+          agent that connects to this app — the token is regenerated, so an
+          agent still sending the old one is refused. The watch database is
+          unaffected.
+        </p>
       </description>
     </release>
   </releases>

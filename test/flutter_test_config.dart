@@ -32,11 +32,16 @@ DynamicLibrary _openVendoredSqlite3() {
     'sqlite3.dll',
   );
 
-  // Falling back to the bare name rather than throwing keeps the tests running
-  // for anyone who has a sqlite3.dll on the DLL search path already, and turns
-  // a missing vendored file into the package's own load error rather than a
-  // path error from here.
-  return File(vendored).existsSync()
-      ? DynamicLibrary.open(vendored)
-      : DynamicLibrary.open('sqlite3.dll');
+  // Deliberately no fallback to a bare `sqlite3.dll`. Resolving through the
+  // Windows DLL search path would load whatever build happens to be on the
+  // machine, so a missing or pruned vendored file would produce a green run
+  // that never exercised the engine the app actually ships — the exact thing
+  // vendoring exists to guarantee. Fail loudly and name the fix instead.
+  if (!File(vendored).existsSync()) {
+    throw StateError(
+      'Vendored sqlite3.dll not found at $vendored. '
+      'See third_party/sqlite3/windows-x64/README.md.',
+    );
+  }
+  return DynamicLibrary.open(vendored);
 }

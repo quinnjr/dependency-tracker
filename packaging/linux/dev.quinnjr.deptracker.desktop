@@ -9,4 +9,4 @@ Terminal=false
 Categories=Development;
 Keywords=dependency;version;package;release;update;mcp;
 StartupNotify=true
-StartupWMClass=deptracker
+StartupWMClass=dev.quinnjr.deptracker
