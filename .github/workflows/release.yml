@@ -97,116 +97,16 @@ jobs:
           tar -C build/linux/x64/release/bundle -czf \
             "deptracker-$v-linux-x64.tar.gz" .
 
-      - name: Install Flatpak runtime
-        run: |
-          set -euo pipefail
-          flatpak remote-add --user --if-not-exists \
-            flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y flathub \
-            "org.gnome.Platform//$GNOME_RUNTIME_VERSION" \
-            "org.gnome.Sdk//$GNOME_RUNTIME_VERSION"
+      - name: Build and verify the Flatpak
+        uses: ./.github/actions/flatpak-verify
+        with:
+          runtime-version: ${{ env.GNOME_RUNTIME_VERSION }}
 
-      - name: Build Flatpak
-        run: |
-          set -euo pipefail
-          flatpak-builder --user --force-clean --repo=.flatpak-repo \
-            .flatpak-build packaging/flatpak/dev.quinnjr.deptracker.yml
-          v="${{ needs.verify.outputs.version }}"
-          flatpak build-bundle .flatpak-repo \
-            "dev.quinnjr.deptracker-$v.flatpak" dev.quinnjr.deptracker
-
-      - name: Verify Flatpak libraries resolve
-        # A bundle built against a newer glibc than the runtime ships installs
-        # cleanly and only fails at launch, so this gate is the real guard
-        # behind the ubuntu-24.04 pin above.
-        #
-        # The enumeration runs INSIDE the sandbox. Globbing on the runner
-        # would match nothing (/app exists only in the sandbox), bash would
-        # pass the literal pattern to ldd, ldd would answer "No such file or
-        # directory" — which does not contain "not found" — and the gate would
-        # pass having checked nothing. The plugin .so files are exactly the
-        # ones that carry the too-new glibc reference, so skipping them would
-        # defeat the entire check.
+      - name: Name the Flatpak bundle for release
         run: |
           set -euo pipefail
           v="${{ needs.verify.outputs.version }}"
-          flatpak install --user -y "dev.quinnjr.deptracker-$v.flatpak"
-
-          libs="$(flatpak run --command=sh dev.quinnjr.deptracker -c \
-            'ls /app/deptracker/deptracker /app/deptracker/lib/*.so')"
-          count="$(printf '%s\n' "$libs" | grep -c . || true)"
-          # The executable plus at least one plugin. A layout change that
-          # emptied this list must fail loudly rather than pass vacuously.
-          if [ "$count" -lt 2 ]; then
-            echo "::error::expected the executable and its plugins, found $count:"
-            printf '%s\n' "$libs"
-            exit 1
-          fi
-          echo "checking $count libraries"
-
-          missing=0
-          for lib in $libs; do
-            if ! out="$(flatpak run --command=ldd dev.quinnjr.deptracker "$lib" 2>&1)"; then
-              echo "::error::ldd failed for $lib"
-              printf '%s\n' "$out"
-              missing=1
-              continue
-            fi
-            if printf '%s\n' "$out" | grep -q 'not found'; then
-              echo "::error::Unresolved libraries in $lib"
-              printf '%s\n' "$out" | grep 'not found'
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ] || exit 1
-
-      - name: Smoke-test the Flatpak
-        # Resolving every library is not the same as starting. This launches
-        # the real bundle headlessly and waits for the database to appear,
-        # which proves three things at once: the app runs under the sandbox,
-        # the GTK/GNOME runtime pairing is right, and --filesystem=home:ro is
-        # sufficient — the app writes its state through XDG paths that Flatpak
-        # redirects into ~/.var/app, and never needs to write to $HOME itself.
-        # A read-only grant that broke the database would otherwise surface as
-        # a first-launch crash for whoever installed the release.
-        run: |
-          set -euo pipefail
-          sudo apt-get install -y xvfb
-
-          data="$HOME/.var/app/dev.quinnjr.deptracker/data/deptracker"
-          rm -rf "$data"
-
-          xvfb-run -a flatpak run dev.quinnjr.deptracker > app.log 2>&1 &
-          app=$!
-
-          # Poll rather than sleeping a fixed amount: the app is ready when it
-          # has written its database, and how long that takes is not something
-          # to guess at.
-          for _ in $(seq 1 30); do
-            if compgen -G "$data/*.db" > /dev/null; then break; fi
-            if ! kill -0 "$app" 2>/dev/null; then break; fi
-            sleep 1
-          done
-
-          if ! compgen -G "$data/*.db" > /dev/null; then
-            echo "::error::the app did not create its database within 30s"
-            echo "--- app output ---"
-            cat app.log
-            kill "$app" 2>/dev/null || true
-            exit 1
-          fi
-
-          # Still running, rather than having written a database on its way
-          # down.
-          if ! kill -0 "$app" 2>/dev/null; then
-            echo "::error::the app exited after creating its database"
-            cat app.log
-            exit 1
-          fi
-
-          echo "started, and wrote $(ls "$data")"
-          kill "$app" 2>/dev/null || true
-          wait "$app" 2>/dev/null || true
+          mv dev.quinnjr.deptracker.flatpak "dev.quinnjr.deptracker-$v.flatpak"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

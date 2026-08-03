@@ -1,0 +1,129 @@
+name: Build and verify the Flatpak
+description: >-
+  Builds the Flatpak from an already-built Linux bundle, then proves it both
+  resolves and runs.
+
+# Shared by ci.yml and release.yml so the gates run on the pull request that
+# changes packaging, rather than for the first time on a tag in front of
+# users. Neither gate can be exercised on a developer machine whose glibc is
+# newer than the runtime's, which is the common case on a rolling distro.
+inputs:
+  runtime-version:
+    description: org.gnome.Platform branch to build against.
+    required: true
+  app-id:
+    description: Flatpak application id.
+    required: false
+    default: dev.quinnjr.deptracker
+
+runs:
+  using: composite
+  steps:
+    - name: Install Flatpak tooling
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y flatpak flatpak-builder xvfb
+        flatpak remote-add --user --if-not-exists \
+          flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+        flatpak install --user -y flathub \
+          "org.gnome.Platform//${{ inputs.runtime-version }}" \
+          "org.gnome.Sdk//${{ inputs.runtime-version }}"
+
+    - name: Build and install the Flatpak
+      shell: bash
+      run: |
+        set -euo pipefail
+        flatpak-builder --user --force-clean --repo=.flatpak-repo \
+          .flatpak-build "packaging/flatpak/${{ inputs.app-id }}.yml"
+        flatpak build-bundle .flatpak-repo \
+          "${{ inputs.app-id }}.flatpak" "${{ inputs.app-id }}"
+        flatpak install --user -y --reinstall "${{ inputs.app-id }}.flatpak"
+
+    - name: Verify every bundled library resolves
+      shell: bash
+      # A bundle built against a newer glibc than the runtime ships installs
+      # cleanly and only fails at launch, so this is the guard behind the
+      # pinned ubuntu-24.04 runner.
+      #
+      # The enumeration runs INSIDE the sandbox. Globbing on the runner would
+      # match nothing (/app exists only in the sandbox), bash would pass the
+      # literal pattern to ldd, ldd would answer "No such file or directory" —
+      # which does not contain "not found" — and the gate would pass having
+      # checked nothing. The plugin .so files are exactly the ones that carry
+      # a too-new glibc reference.
+      run: |
+        set -euo pipefail
+        libs="$(flatpak run --command=sh "${{ inputs.app-id }}" -c \
+          'ls /app/deptracker/deptracker /app/deptracker/lib/*.so')"
+        count="$(printf '%s\n' "$libs" | grep -c . || true)"
+        if [ "$count" -lt 2 ]; then
+          echo "::error::expected the executable and its plugins, found $count:"
+          printf '%s\n' "$libs"
+          exit 1
+        fi
+        echo "checking $count libraries"
+
+        missing=0
+        for lib in $libs; do
+          if ! out="$(flatpak run --command=ldd "${{ inputs.app-id }}" "$lib" 2>&1)"; then
+            echo "::error::ldd failed for $lib"
+            printf '%s\n' "$out"
+            missing=1
+            continue
+          fi
+          if printf '%s\n' "$out" | grep -q 'not found'; then
+            echo "::error::Unresolved libraries in $lib"
+            printf '%s\n' "$out" | grep 'not found'
+            missing=1
+          fi
+        done
+        [ "$missing" -eq 0 ] || exit 1
+
+    - name: Smoke-test the Flatpak
+      shell: bash
+      # Resolving every library is not the same as starting. Launching the
+      # real bundle proves three things at once: it runs under the sandbox,
+      # the GTK/GNOME runtime pairing is right, and --filesystem=home:ro is
+      # sufficient — the app writes its state through XDG paths that Flatpak
+      # redirects into ~/.var/app and never writes to $HOME itself. A
+      # read-only grant that broke the database would otherwise surface as a
+      # first-launch crash for whoever installed the release.
+      run: |
+        set -euo pipefail
+        data="$HOME/.var/app/${{ inputs.app-id }}/data/deptracker"
+        rm -rf "$data"
+
+        xvfb-run -a flatpak run "${{ inputs.app-id }}" > app.log 2>&1 &
+        app=$!
+
+        # Poll rather than sleeping a fixed amount: the app is ready when it
+        # has written its database, and how long that takes is not something
+        # to guess at.
+        for _ in $(seq 1 40); do
+          if compgen -G "$data/*.db" > /dev/null; then break; fi
+          if ! kill -0 "$app" 2>/dev/null; then break; fi
+          sleep 1
+        done
+
+        if ! compgen -G "$data/*.db" > /dev/null; then
+          echo "::error::the app did not create its database within 40s"
+          echo "--- app output ---"
+          cat app.log || true
+          kill "$app" 2>/dev/null || true
+          exit 1
+        fi
+
+        # Still running, rather than having written a database on its way down.
+        if ! kill -0 "$app" 2>/dev/null; then
+          echo "::error::the app exited after creating its database"
+          cat app.log || true
+          exit 1
+        fi
+
+        echo "started, and wrote: $(ls "$data")"
+        echo "--- app output ---"
+        cat app.log || true
+        kill "$app" 2>/dev/null || true
+        wait "$app" 2>/dev/null || true
