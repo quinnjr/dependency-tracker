@@ -1,0 +1,212 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: 3.44.6
+
+jobs:
+  verify:
+    name: Verify tag matches pubspec
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Compare tag against pubspec version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pubspec="$(grep -m1 '^version:' pubspec.yaml | sed 's/^version:[[:space:]]*//' | cut -d+ -f1)"
+          if [ "$tag" != "$pubspec" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match pubspec version $pubspec." \
+                 "Bump pubspec.yaml or retag before releasing."
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux (tarball and Flatpak)
+    needs: verify
+    # Pinned rather than ubuntu-latest on purpose. The Flatpak packages a
+    # bundle built here, so the binaries must link against a glibc no newer
+    # than the org.gnome.Platform//50 runtime's (2.42). This runner is 2.39;
+    # letting the label drift to a newer Ubuntu would silently produce a
+    # Flatpak that fails to start. The ldd gate below enforces it regardless.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libsqlite3-dev \
+            libsecret-1-dev libjsoncpp-dev \
+            flatpak flatpak-builder
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter build linux --release
+
+      - name: Package tarball
+        run: |
+          set -euo pipefail
+          v="${{ needs.verify.outputs.version }}"
+          tar -C build/linux/x64/release/bundle -czf \
+            "deptracker-$v-linux-x64.tar.gz" .
+
+      - name: Install Flatpak runtime
+        run: |
+          set -euo pipefail
+          flatpak remote-add --user --if-not-exists \
+            flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.gnome.Platform//50 org.gnome.Sdk//50
+
+      - name: Build Flatpak
+        run: |
+          set -euo pipefail
+          flatpak-builder --user --force-clean --repo=.flatpak-repo \
+            .flatpak-build packaging/flatpak/dev.quinnjr.deptracker.yml
+          v="${{ needs.verify.outputs.version }}"
+          flatpak build-bundle .flatpak-repo \
+            "dev.quinnjr.deptracker-$v.flatpak" dev.quinnjr.deptracker
+
+      - name: Verify Flatpak libraries resolve
+        # A Flutter bundle built against a newer glibc than the runtime ships
+        # will install cleanly and only fail at launch. Catch that here rather
+        # than shipping a Flatpak that cannot start.
+        run: |
+          set -euo pipefail
+          v="${{ needs.verify.outputs.version }}"
+          flatpak install --user -y "dev.quinnjr.deptracker-$v.flatpak"
+          missing=0
+          for lib in /app/deptracker/deptracker /app/deptracker/lib/*.so; do
+            if flatpak run --command=ldd dev.quinnjr.deptracker "$lib" 2>&1 \
+                 | grep -q 'not found'; then
+              echo "::error::Unresolved libraries in $lib"
+              flatpak run --command=ldd dev.quinnjr.deptracker "$lib" 2>&1 \
+                | grep 'not found' || true
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            deptracker-*-linux-x64.tar.gz
+            dev.quinnjr.deptracker-*.flatpak
+          if-no-files-found: error
+
+  macos:
+    name: macOS
+    needs: verify
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter build macos --release
+
+      - name: Package app
+        run: |
+          set -euo pipefail
+          v="${{ needs.verify.outputs.version }}"
+          app="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -1)"
+          [ -n "$app" ] || { echo "::error::No .app produced"; exit 1; }
+          ditto -c -k --sequesterRsrc --keepParent "$app" "deptracker-$v-macos.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: deptracker-*-macos.zip
+          if-no-files-found: error
+
+  windows:
+    name: Windows
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+      - run: flutter build windows --release
+
+      - name: Package archive
+        shell: pwsh
+        run: |
+          $v = "${{ needs.verify.outputs.version }}"
+          Compress-Archive -Path build/windows/x64/runner/Release/* `
+            -DestinationPath "deptracker-$v-windows-x64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: deptracker-*-windows-x64.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [verify, linux, macos, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          v="${{ needs.verify.outputs.version }}"
+          cat > notes.md <<'EOF'
+          ## Downloads
+
+          | Platform | File |
+          | --- | --- |
+          | Linux (Flatpak) | `dev.quinnjr.deptracker-VERSION.flatpak` |
+          | Linux (portable) | `deptracker-VERSION-linux-x64.tar.gz` |
+          | macOS | `deptracker-VERSION-macos.zip` |
+          | Windows | `deptracker-VERSION-windows-x64.zip` |
+
+          Install the Flatpak with:
+
+          ```
+          flatpak install --user dev.quinnjr.deptracker-VERSION.flatpak
+          ```
+
+          The macOS and Windows builds are unsigned, so Gatekeeper and
+          SmartScreen will warn on first launch.
+          EOF
+          sed -i "s/VERSION/$v/g" notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "v$v" \
+            --notes-file notes.md \
+            artifacts/*

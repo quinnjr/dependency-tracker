@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.quinnjr.deptracker</id>
+
+  <name>Dependency Tracker</name>
+  <summary>Watch project dependencies for new releases</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <developer id="dev.quinnjr">
+    <name>Joseph R. Quinn</name>
+  </developer>
+
+  <description>
+    <p>
+      Dependency Tracker scans the project manifests already on your disk, works
+      out which packages they depend on, and watches those packages for new
+      releases. Results are deduplicated across all of your local repositories,
+      so a package used by six projects is tracked once rather than six times.
+    </p>
+    <p>Supported registries:</p>
+    <ul>
+      <li>pub.dev</li>
+      <li>npm</li>
+      <li>crates.io</li>
+      <li>PyPI</li>
+      <li>Go modules</li>
+      <li>GitHub releases</li>
+    </ul>
+    <p>
+      A loopback MCP server is included, letting coding agents query the same
+      dependency data over the Model Context Protocol.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">dev.quinnjr.deptracker.desktop</launchable>
+
+  <url type="homepage">https://github.com/quinnjr/dependency-tracker</url>
+  <url type="bugtracker">https://github.com/quinnjr/dependency-tracker/issues</url>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="1.0.0" date="2026-08-03">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

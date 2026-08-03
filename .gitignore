@@ -7,3 +7,6 @@ build/
 .idea/
 docs/superpowers/
 .flutter-plugins-dependencies
+.flatpak-build/
+.flatpak-repo/
+.flatpak-builder/
