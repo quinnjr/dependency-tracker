@@ -73,9 +73,21 @@ runs:
             missing=1
             continue
           fi
-          if printf '%s\n' "$out" | grep -q 'not found'; then
+
+          # libjvm.so is expected to be absent and is not a defect.
+          # path_provider_android pulls in the `jni` package, whose
+          # libdartjni.so lands in the Linux bundle even though the Android
+          # implementation it belongs to is never selected on desktop. It
+          # wants a JVM, which no desktop runtime ships, and nothing on this
+          # platform ever dlopens it. Exempting the one line rather than
+          # skipping the whole library keeps every other unresolved symbol in
+          # it — including a glibc version bump — a failure. The launch test
+          # below is what proves the exemption is safe.
+          unresolved="$(printf '%s\n' "$out" | grep 'not found' \
+            | grep -v 'libjvm\.so' || true)"
+          if [ -n "$unresolved" ]; then
             echo "::error::Unresolved libraries in $lib"
-            printf '%s\n' "$out" | grep 'not found'
+            printf '%s\n' "$unresolved"
             missing=1
           fi
         done
