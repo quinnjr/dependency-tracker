@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:deptracker/models.dart';
@@ -576,24 +577,40 @@ void main() {
       final c = s.upsertWatch(WatchKind.pub, 'ccc');
       final d = s.upsertWatch(WatchKind.pub, 'ddd');
       final requestedPaths = <String>[];
+
+      // 'aaa' must finish *after* the stop flag is set, so that it proves an
+      // already-in-flight request still keeps its data when the pool stops.
+      // Sleeping for longer than 'bbb' takes would express that as a race the
+      // event loop decides — fine locally, a once-a-month CI failure that
+      // looks like a product bug. Instead 'aaa' blocks on a completer that is
+      // only completed once refreshAll reports its first finished watch.
+      //
+      // That handshake is what makes the ordering structural: 'bbb' sets
+      // `stopped` inside its catch *before* the progress callback runs, so by
+      // the time this completes, the flag is guaranteed set. And 'aaa' cannot
+      // be the watch that reports first, because it is parked here until it
+      // is released.
+      final stopFlagSet = Completer<void>();
+
       final net = Net(
         client: MockClient((req) async {
           requestedPaths.add(req.url.path);
           if (req.url.path.endsWith('/aaa')) {
-            // Resolves after 'bbb' has already thrown and set the stop
-            // flag, so this proves an already-in-flight request that
-            // happens to finish later still keeps its data -- the pool
-            // doesn't cancel or discard work in progress when it stops.
-            await Future<void>.delayed(const Duration(milliseconds: 20));
+            await stopFlagSet.future;
             return http.Response(pubBody(['1.0.0']), 200);
           }
-          // 'bbb' rate-limits immediately (no delay), so its exception
-          // sets the stop flag well before 'aaa' resolves.
           return http.Response('rate limited', 429);
         }),
       );
 
-      final report = await refreshAll(s, net, concurrency: 2);
+      final report = await refreshAll(
+        s,
+        net,
+        concurrency: 2,
+        onProgress: (done, _) {
+          if (done == 1 && !stopFlagSet.isCompleted) stopFlagSet.complete();
+        },
+      );
 
       expect(report.rateLimited, isTrue);
       // 'aaa' was already in flight when the stop flag was set and still
