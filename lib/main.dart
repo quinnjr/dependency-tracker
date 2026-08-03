@@ -42,7 +42,10 @@ Future<void> main() async {
   try {
     final token = await secrets.mcpToken();
     transport = McpTransport(
-      server: McpServer(buildTools(store, refresh: refresh)),
+      // A factory, not an instance: every MCP session gets its own server, and
+      // the tools close over the live [store] so a session opened an hour ago
+      // still reads current data.
+      onSession: () => buildMcpServer(buildTools(store, refresh: refresh)),
       bearerToken: token,
     );
     mcpPort = await transport.start();

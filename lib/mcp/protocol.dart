@@ -1,123 +1,70 @@
 import 'dart:convert';
 
+import 'package:mcp_sse_server/mcp_sse_server.dart' as mcp;
+
 import '../redact.dart';
 import 'tools.dart';
 
-/// MCP revision this server implements.
-const String mcpProtocolVersion = '2025-06-18';
+/// MCP revision this server speaks.
+///
+/// Comes from `package:mcp_sse_server` rather than being asserted here; kept as
+/// a named constant because the settings pane and the docs quote it.
+const String mcpProtocolVersion = mcp.latestProtocolVersion;
 const String serverName = 'dependency-tracker';
 const String serverVersion = '0.1.0';
 
-// JSON-RPC 2.0 error codes.
-const int _invalidRequest = -32600;
-const int _methodNotFound = -32601;
-const int _invalidParams = -32602;
-
-class McpServer {
-  McpServer(List<ToolDef> tools)
-    : _tools = {for (final t in tools) t.name: t},
-      _order = tools.map((t) => t.name).toList();
-
-  final Map<String, ToolDef> _tools;
-  final List<String> _order;
-
-  /// Handles one JSON-RPC request. Returns null when the message is a
-  /// notification, which must not be answered — the transport replies 202.
-  Future<Map<String, Object?>?> handle(Map<String, Object?> request) async {
-    final id = request['id'];
-    final method = request['method'];
-    final isNotification = id == null;
-
-    if (method is! String) {
-      if (isNotification) return null;
-      return _error(id, _invalidRequest, 'request has no method');
-    }
-
-    // Notifications carry no id and get no reply, whether or not we know them.
-    if (isNotification) return null;
-
-    switch (method) {
-      case 'initialize':
-        return _result(id, {
-          'protocolVersion': mcpProtocolVersion,
-          // Only what is actually implemented: no resources, prompts, or
-          // sampling. Advertising an unimplemented capability makes clients
-          // call methods that then fail.
-          'capabilities': {'tools': <String, Object?>{}},
-          'serverInfo': {'name': serverName, 'version': serverVersion},
-        });
-
-      case 'ping':
-        return _result(id, <String, Object?>{});
-
-      case 'tools/list':
-        return _result(id, {
-          'tools': [
-            for (final name in _order)
-              {
-                'name': name,
-                'description': _tools[name]!.description,
-                'inputSchema': _tools[name]!.inputSchema,
-              },
-          ],
-        });
-
-      case 'tools/call':
-        return _callTool(id, request['params']);
-
-      default:
-        return _error(id, _methodNotFound, 'unknown method: $method');
-    }
+/// Builds the MCP server for one session.
+///
+/// The protocol itself — JSON-RPC framing, the `initialize` handshake,
+/// capability advertisement, pagination, cancellation — belongs to
+/// `package:mcp_sse_server`. What stays here is the adaptation of this app's
+/// [ToolDef]s onto its [mcp.Tool], because the tools are the part that is
+/// actually about dependency tracking.
+///
+/// A fresh server per session is deliberate: [mcp.McpServer] carries
+/// per-session state (initialization, subscriptions, in-flight requests), so
+/// sharing one across clients would make a second client's `initialize`
+/// collide with the first's session.
+mcp.McpServer buildMcpServer(List<ToolDef> tools) {
+  final server = mcp.McpServer(
+    name: serverName,
+    version: serverVersion,
+    title: 'Dependency Tracker',
+    instructions:
+        'Tracks dependency versions across the projects on this machine. '
+        'Use list_watches to see what is tracked and get_watch for detail.',
+  );
+  for (final tool in tools) {
+    server.addTool(_asMcpTool(tool));
   }
+  return server;
+}
 
-  Future<Map<String, Object?>> _callTool(Object? id, Object? params) async {
-    final args = params is Map ? params : const <String, Object?>{};
-    final name = args['name'];
-    final tool = name is String ? _tools[name] : null;
-    if (tool == null) {
-      return _error(id, _invalidParams, 'unknown tool: $name');
-    }
-
-    final rawArguments = args['arguments'];
-    final arguments = rawArguments is Map
-        ? Map<String, Object?>.from(rawArguments)
-        : <String, Object?>{};
-
+mcp.Tool _asMcpTool(ToolDef def) => mcp.Tool(
+  name: def.name,
+  description: def.description,
+  inputSchema: def.inputSchema,
+  handler: (arguments, context) async {
     try {
-      final value = await tool.handler(arguments);
-      return _result(id, _content(_encode(value), isError: false));
+      return _resultOf(await def.handler(Map<String, Object?>.from(arguments)));
     } catch (e) {
       // A tool failure is a result the model can read and react to, not a
-      // protocol error. Redacted because a failing refresh can carry a
-      // registry error string.
-      return _result(
-        id,
-        _content('Error: ${redact(e.toString())}', isError: true),
-      );
+      // protocol error — an agent that asked about a package that no longer
+      // exists should be told so, not handed a JSON-RPC error it cannot
+      // attribute to a call. Redacted because a failing refresh can carry a
+      // registry error string, and redact() is the only thing standing between
+      // a keyring token and the transcript.
+      return mcp.CallToolResult.error('Error: ${redact(e.toString())}');
     }
-  }
+  },
+);
 
-  Map<String, Object?> _content(String text, {required bool isError}) => {
-    'content': [
-      {'type': 'text', 'text': text},
-    ],
-    'isError': isError,
-  };
-
-  String _encode(Object? value) {
-    if (value is String) return value;
-    return const JsonEncoder.withIndent('  ').convert(value);
-  }
-
-  Map<String, Object?> _result(Object? id, Object? result) => {
-    'jsonrpc': '2.0',
-    'id': id,
-    'result': result,
-  };
-
-  Map<String, Object?> _error(Object? id, int code, String message) => {
-    'jsonrpc': '2.0',
-    'id': id,
-    'error': {'code': code, 'message': redact(message)},
-  };
+/// Mirrors the pre-package encoding: a String is the text itself, anything else
+/// is pretty-printed JSON. Clients and the e2e tests read `content[0].text`, so
+/// changing this would be a visible protocol change, not a refactor.
+mcp.CallToolResult _resultOf(Object? value) {
+  if (value is String) return mcp.CallToolResult.text(value);
+  return mcp.CallToolResult.text(
+    const JsonEncoder.withIndent('  ').convert(value),
+  );
 }
