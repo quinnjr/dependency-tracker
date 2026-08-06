@@ -3,6 +3,13 @@ import '../models.dart';
 import '../refresh.dart';
 import '../store.dart';
 
+/// Documented once, quoted by every tool that takes `id`/`name`. Five
+/// hand-maintained copies would drift, and a tool's description is the only
+/// thing a consuming agent ever sees — so a drifted copy is a behavioural lie.
+const String _idOrNameNote =
+    'Accepts id, name, or both; if both are given they must identify the same '
+    'watch or the call fails.';
+
 class ToolDef {
   const ToolDef({
     required this.name,
@@ -50,34 +57,90 @@ int? _coerceOptionalInt(Object? v, String paramName) {
   throw ArgumentError.value(v, paramName, 'must be an integer');
 }
 
+/// [_coerceOptionalInt] plus the `minimum: 1` the schemas already advertise.
+/// Two copies of the coerce-then-range pair had drifted apart on where they
+/// ran relative to the query they bound.
+int? _coerceOptionalPositiveInt(Object? v, String paramName) {
+  final n = _coerceOptionalInt(v, paramName);
+  if (n != null && n < 1) {
+    throw ArgumentError.value(n, paramName, 'must be at least 1');
+  }
+  return n;
+}
+
+/// The string counterpart. Without it a wrong-typed `name`/`version`/
+/// `newer_than` reached the client as a raw Dart `_TypeError` naming an
+/// internal type — which, per [_coerceOptionalInt]'s own reasoning, is not a
+/// message an MCP client can act on.
+String? _coerceOptionalString(Object? v, String paramName) {
+  if (v == null) return null;
+  if (v is String) return v;
+  throw ArgumentError.value(v, paramName, 'must be a string');
+}
+
+/// Resolves [name] to a watch id, the same way add_watch does, rather than
+/// rolling a second definition of package identity here: canonicalize()
+/// already knows each kind's equivalence rule (PyPI folds `-_.` together,
+/// Go does not fold case at all), so trying it is what lets add_watch and
+/// get_watch agree on every spelling — and, just as importantly, refuse to
+/// agree on a Go module path differing only in case.
+int _resolveWatchByName(Store store, String name) {
+  for (final k in WatchKind.values) {
+    final w = store.watchByIdentity(k, canonicalize(k, name));
+    if (w != null) return w.id!;
+  }
+  // Exact fallback for a spelling no kind's canonicalize() recognises as
+  // equivalent to anything stored. Case-sensitive: a case-insensitive
+  // fallback would reintroduce the Go over-match canonicalize() exists to
+  // prevent.
+  for (final w in store.watches()) {
+    if (w.displayName == name) return w.id!;
+  }
+  throw ArgumentError.value(name, 'name', 'no such watch');
+}
+
 int _requireWatchId(Store store, Map<String, Object?> args) {
   final id = _coerceOptionalInt(args['id'], 'id');
+  final name = args['name'];
+  final hasName = name is String;
+
   if (id != null) {
     if (store.watchById(id) == null) {
       throw ArgumentError.value(id, 'id', 'no such watch');
     }
+    // A caller passing both id and name only is safe to honour if the two
+    // actually agree — an agent that drifted (a correct id alongside a
+    // stale or wrong name) must be told its inputs disagree rather than
+    // have the mismatch silently swallowed by preferring id, which is
+    // exactly the hazard this check exists to catch. Only resolve name
+    // when it is actually supplied, so the single-parameter path costs no
+    // extra query.
+    if (hasName) {
+      // Ask whether `name` is a valid spelling of *this* watch, not what the
+      // name resolves to globally. _resolveWatchByName answers with the first
+      // matching WatchKind in enum order, so on a cross-registry collision —
+      // `http` on both pub and npm, and this is a multi-registry tracker where
+      // `path`, `uuid`, `crypto` and `requests` collide routinely — it always
+      // answers "pub". A caller passing the npm watch's own id alongside its
+      // own correct name would then be told the two disagree.
+      //
+      // Comparing against the id'd watch keeps the Go case-sensitivity
+      // guarantee: neither canonicalize(go, ...) nor the displayName
+      // comparison folds case.
+      final watch = store.watchById(id)!;
+      final agrees =
+          canonicalize(watch.kind, name) == watch.name ||
+          watch.displayName == name;
+      if (!agrees) {
+        throw ArgumentError(
+          'id ($id) and name ("$name") refer to different watches',
+        );
+      }
+    }
     return id;
   }
-  final name = args['name'];
-  if (name is String) {
-    // Resolve by identity, the same way add_watch does, rather than rolling
-    // a second definition of package identity here: canonicalize() already
-    // knows each kind's equivalence rule (PyPI folds `-_.` together, Go does
-    // not fold case at all), so trying it is what lets add_watch and
-    // get_watch agree on every spelling — and, just as importantly, refuse
-    // to agree on a Go module path differing only in case.
-    for (final k in WatchKind.values) {
-      final w = store.watchByIdentity(k, canonicalize(k, name));
-      if (w != null) return w.id!;
-    }
-    // Exact fallback for a spelling no kind's canonicalize() recognises as
-    // equivalent to anything stored. Case-sensitive: a case-insensitive
-    // fallback would reintroduce the Go over-match canonicalize() exists to
-    // prevent.
-    for (final w in store.watches()) {
-      if (w.displayName == name) return w.id!;
-    }
-    throw ArgumentError.value(name, 'name', 'no such watch');
+  if (hasName) {
+    return _resolveWatchByName(store, name);
   }
   throw ArgumentError('one of `id` or `name` is required');
 }
@@ -157,12 +220,13 @@ List<ToolDef> buildTools(
         },
       },
       handler: (args) async {
-        final filterName = args['filter'] as String? ?? 'all';
+        final filterName =
+            _coerceOptionalString(args['filter'], 'filter') ?? 'all';
         final filter = _filterByName(filterName);
         if (filter == null) {
           throw ArgumentError.value(filterName, 'filter', 'unknown filter');
         }
-        final kindName = args['kind'] as String?;
+        final kindName = _coerceOptionalString(args['kind'], 'kind');
         WatchKind? kind;
         if (kindName != null) {
           kind = _kindByName(kindName);
@@ -170,13 +234,10 @@ List<ToolDef> buildTools(
             throw ArgumentError.value(kindName, 'kind', 'unknown kind');
           }
         }
+        final limit = _coerceOptionalPositiveInt(args['limit'], 'limit');
         return _watchJsonList(
           store,
-          store.watches(
-            filter: filter,
-            kind: kind,
-            limit: _coerceOptionalInt(args['limit'], 'limit'),
-          ),
+          store.watches(filter: filter, kind: kind, limit: limit),
         );
       },
     ),
@@ -186,7 +247,7 @@ List<ToolDef> buildTools(
       description:
           'Get one watch with every project that uses it and the version each '
           'one pins. This is the cross-repo view: a package used in five '
-          'repos is one watch with five usages.',
+          'repos is one watch with five usages. $_idOrNameNote',
       inputSchema: const {
         'type': 'object',
         'properties': {
@@ -227,7 +288,8 @@ List<ToolDef> buildTools(
       name: 'get_release_notes',
       description:
           'Release notes for a watch, newest first. Pass newer_than to get '
-          'only what shipped after a version you already know about.',
+          'only what shipped after a version you already know about. '
+          '$_idOrNameNote',
       inputSchema: const {
         'type': 'object',
         'properties': {
@@ -247,11 +309,14 @@ List<ToolDef> buildTools(
       },
       handler: (args) async {
         final id = _requireWatchId(store, args);
+        // Validated before the query rather than after it: rejecting a call
+        // only once its rows have been read wastes the read and was the odd
+        // one out against list_watches.
+        final limit = _coerceOptionalPositiveInt(args['limit'], 'limit');
         var releases = store.releasesFor(
           id,
-          newerThan: args['newer_than'] as String?,
+          newerThan: _coerceOptionalString(args['newer_than'], 'newer_than'),
         );
-        final limit = _coerceOptionalInt(args['limit'], 'limit');
         if (limit != null && releases.length > limit) {
           releases = releases.sublist(0, limit);
         }
@@ -377,7 +442,8 @@ List<ToolDef> buildTools(
       name: 'remove_watch',
       description:
           'Stop watching something. Its releases and usage records go '
-          'with it; a rescan recreates the watch if a project still uses it.',
+          'with it; a rescan recreates the watch if a project still uses it. '
+          '$_idOrNameNote',
       inputSchema: const {
         'type': 'object',
         'properties': {
@@ -404,7 +470,7 @@ List<ToolDef> buildTools(
       name: 'mark_read',
       description:
           'Mark a watch triaged. With no version, marks every release '
-          'read; with a version, only that one.',
+          'read; with a version, only that one. $_idOrNameNote',
       inputSchema: const {
         'type': 'object',
         'properties': {
@@ -423,7 +489,10 @@ List<ToolDef> buildTools(
       },
       handler: (args) async {
         final id = _requireWatchId(store, args);
-        store.markRead(id, version: args['version'] as String?);
+        store.markRead(
+          id,
+          version: _coerceOptionalString(args['version'], 'version'),
+        );
         return {'marked': id};
       },
     ),
@@ -432,7 +501,7 @@ List<ToolDef> buildTools(
       name: 'snooze',
       description:
           'Hide a watch from the unread and outdated filters until an '
-          'ISO 8601 timestamp.',
+          'ISO 8601 timestamp. $_idOrNameNote',
       inputSchema: const {
         'type': 'object',
         'properties': {

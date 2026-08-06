@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  timeoutAndLifecycleTests();
   setUp(clearSecrets);
 
   test('returns the body on 200', () async {
@@ -242,4 +243,87 @@ void main() {
       expect(sawConditionalRequest, isFalse);
     },
   );
+}
+
+// The bound on a single request, the generic-exception arm, and close().
+void timeoutAndLifecycleTests() {
+  test('a request that never answers fails the watch instead of hanging the '
+      'refresh', () async {
+    // refreshAll awaits every worker, so one socket that accepts and then
+    // goes quiet would otherwise park a worker forever, defeat the
+    // rate-limit stop, and leave the UI's in-progress state stuck.
+    final net = Net(
+      requestTimeout: const Duration(milliseconds: 50),
+      client: MockClient((_) async {
+        await Future<void>.delayed(const Duration(seconds: 30));
+        return http.Response('never gets here', 200);
+      }),
+    );
+
+    await expectLater(
+      net.get(Uri.parse('https://example.com/slow')),
+      throwsA(
+        isA<NetException>().having(
+          (e) => e.toString(),
+          'message',
+          allOf(contains('example.com'), contains('no response')),
+        ),
+      ),
+    );
+  });
+
+  test(
+    'a non-client exception is wrapped as a NetException naming the host',
+    () async {
+      // Anything the http stack can throw has to arrive at the per-watch catch
+      // as a NetException, or the message stored on the watch names a Dart
+      // internal instead of the registry that failed.
+      final net = Net(
+        client: MockClient(
+          (_) async => throw const FormatException('bad chunk'),
+        ),
+      );
+
+      await expectLater(
+        net.get(Uri.parse('https://registry.example.com/x')),
+        throwsA(
+          isA<NetException>().having(
+            (e) => e.toString(),
+            'message',
+            contains('registry.example.com'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test('close releases the underlying client', () async {
+    // main.dart closes Net on exit; a client left open holds its sockets.
+    var closed = false;
+    final net = Net(client: _ClosableMock(() => closed = true));
+    net.close();
+    expect(closed, isTrue);
+  });
+
+  test('the default constructor builds its own client', () {
+    // The `?? http.Client()` arm: production never passes one in.
+    final net = Net();
+    addTearDown(net.close);
+    expect(net.concurrency, 8);
+    expect(net.requestTimeout, Net.defaultRequestTimeout);
+  });
+}
+
+/// A client that records close(), which MockClient does not expose.
+class _ClosableMock extends http.BaseClient {
+  _ClosableMock(this.onClose);
+
+  final void Function() onClose;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async =>
+      http.StreamedResponse(const Stream.empty(), 200);
+
+  @override
+  void close() => onClose();
 }

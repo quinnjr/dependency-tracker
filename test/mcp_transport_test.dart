@@ -7,6 +7,8 @@ import 'package:deptracker/mcp/transport.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
+import 'mcp_client.dart';
+
 const token = 'test-token-0123456789abcdef';
 
 late McpTransport transport;
@@ -27,17 +29,11 @@ Future<http.Response> post(
   body: body is String ? body : jsonEncode(body),
 );
 
-Map<String, Object?> rpc(String method, [Map<String, Object?>? params]) => {
-  'jsonrpc': '2.0',
-  'id': 1,
-  'method': method,
-  if (params != null) 'params': params,
-};
-
 void main() {
+  transportFailureTests();
   setUp(() async {
     transport = McpTransport(
-      server: McpServer([
+      onSession: () => buildMcpServer([
         ToolDef(
           name: 'echo',
           description: 'Echoes.',
@@ -87,7 +83,19 @@ void main() {
 
   group('authentication', () {
     test('accepts a correct bearer token', () async {
-      final r = await post(rpc('ping'));
+      // `initialize` rather than `ping`: it is the one call that legitimately
+      // needs no prior session, so a 200 here means auth passed rather than
+      // that the request happened to be sessionless.
+      final r = await post(
+        rpc(
+          'initialize',
+          params: {
+            'protocolVersion': mcpProtocolVersion,
+            'capabilities': <String, Object?>{},
+            'clientInfo': {'name': 'test', 'version': '1'},
+          },
+        ),
+      );
       expect(r.statusCode, 200);
     });
 
@@ -145,14 +153,30 @@ void main() {
 
     test('accepts a localhost origin', () async {
       final r = await post(
-        rpc('ping'),
+        rpc(
+          'initialize',
+          params: {
+            'protocolVersion': mcpProtocolVersion,
+            'capabilities': <String, Object?>{},
+            'clientInfo': {'name': 'test', 'version': '1'},
+          },
+        ),
         extra: {'Origin': 'http://localhost:5173'},
       );
       expect(r.statusCode, 200);
     });
 
     test('accepts no origin, which is what native clients send', () async {
-      final r = await post(rpc('ping'));
+      final r = await post(
+        rpc(
+          'initialize',
+          params: {
+            'protocolVersion': mcpProtocolVersion,
+            'capabilities': <String, Object?>{},
+            'clientInfo': {'name': 'test', 'version': '1'},
+          },
+        ),
+      );
       expect(r.statusCode, 200);
     });
 
@@ -170,45 +194,95 @@ void main() {
   });
 
   group('protocol over http', () {
-    test('answers a request with json', () async {
-      final r = await post(
-        rpc('initialize', {'protocolVersion': mcpProtocolVersion}),
-      );
-      expect(r.statusCode, 200);
-      expect(r.headers['content-type'], contains('application/json'));
-      final body = jsonDecode(r.body) as Map<String, Object?>;
-      expect((body['result'] as Map)['protocolVersion'], mcpProtocolVersion);
+    /// Opens a session and returns a client already past the handshake.
+    Future<McpTestClient> session() async {
+      final client = McpTestClient(endpoint, bearer: token);
+      await client.initialize();
+      addTearDown(client.close);
+      return client;
+    }
+
+    test('initialize opens a session and returns the server info', () async {
+      final client = McpTestClient(endpoint, bearer: token);
+      addTearDown(client.close);
+      final reply = await client.initialize();
+
+      // A session id is what every later request is routed by, so its absence
+      // would strand the client on its second call rather than its first.
+      expect(client.sessionId, isNotNull);
+      final info = (reply['result']! as Map)['serverInfo']! as Map;
+      expect(info['name'], serverName);
     });
 
-    test('answers a notification with 202 and no body', () async {
-      final r = await post({
-        'jsonrpc': '2.0',
-        'method': 'notifications/initialized',
-      });
+    test('a request is answered over sse, per streamable http', () async {
+      final client = await session();
+      final response = await client.post(rpc('ping'));
+
+      // The package answers any JSON-RPC *request* on an SSE stream rather
+      // than with a bare JSON body. That is a wire-format change from the
+      // hand-rolled transport, and clients must handle it.
+      expect(response.headers['content-type'], contains('text/event-stream'));
+      expect(parseSse(response.body).single['id'], 1);
+    });
+
+    test('a notification is accepted with 202 and no body', () async {
+      final client = await session();
+      final r = await client.post(
+        rpc('notifications/cancelled', id: null, params: {'requestId': 99}),
+      );
       expect(r.statusCode, 202);
       expect(r.body, isEmpty);
     });
 
-    test('malformed json is a -32700 parse error', () async {
-      final r = await post('{ not json');
-      expect(r.statusCode, 400);
-      expect((jsonDecode(r.body)['error'] as Map)['code'], -32700);
-    });
-
     test(
-      'a json array batch is rejected clearly rather than half-handled',
+      'a request before initialize is refused, not silently served',
       () async {
-        final r = await post([rpc('ping')]);
+        // Without a session the server has no state to answer from; saying so
+        // lets the client start one instead of retrying the same call.
+        final r = await http.post(
+          endpoint,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+          },
+          body: jsonEncode(rpc('tools/list')),
+        );
         expect(r.statusCode, 400);
+        expect(jsonDecode(r.body)['error'], isNotNull);
       },
     );
 
-    test('tools/call round-trips through http', () async {
-      final r = await post(
-        rpc('tools/call', {'name': 'echo', 'arguments': <String, Object?>{}}),
+    test(
+      'an unknown session id is refused so the client can start over',
+      () async {
+        final r = await http.post(
+          endpoint,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer $token',
+            sessionHeader: 'not-a-real-session',
+          },
+          body: jsonEncode(rpc('tools/list')),
+        );
+        expect(r.statusCode, 404);
+      },
+    );
+
+    test('malformed json is rejected before it reaches a session', () async {
+      final r = await http.post(
+        endpoint,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: '{ not json',
       );
-      final result = jsonDecode(r.body)['result'] as Map<String, Object?>;
-      expect(result['isError'], isFalse);
+      expect(r.statusCode, 400);
+    });
+
+    test('tools/call round-trips through http', () async {
+      final client = await session();
+      expect(await client.callTool('echo'), {'ok': true});
     });
 
     test('an unknown path is 404 for an authenticated caller', () async {
@@ -234,14 +308,21 @@ void main() {
     });
 
     test('GET with an event-stream accept opens an sse stream', () async {
-      final client = HttpClient();
-      final request = await client.getUrl(endpoint);
+      final client = await session();
+      final httpClient = HttpClient();
+      addTearDown(() => httpClient.close(force: true));
+
+      final request = await httpClient.getUrl(endpoint);
       request.headers.set('Authorization', 'Bearer $token');
       request.headers.set('Accept', 'text/event-stream');
+      request.headers.set(sessionHeader, client.sessionId!);
       final response = await request.close();
+
       expect(response.statusCode, 200);
       expect(response.headers.contentType!.mimeType, 'text/event-stream');
-      client.close(force: true);
+      // SSE is defined as UTF-8, and the charset is what makes the response
+      // sink encode it — without it non-ASCII payloads kill the stream.
+      expect(response.headers.contentType!.charset, 'utf-8');
     });
 
     test('GET without an event-stream accept is 405', () async {
@@ -252,12 +333,44 @@ void main() {
       expect(r.statusCode, 405);
     });
 
-    test('DELETE is accepted so clients can end a session cleanly', () async {
-      final r = await http.delete(
+    test('DELETE ends the session and is idempotent', () async {
+      final client = McpTestClient(endpoint, bearer: token);
+      await client.initialize();
+      final id = client.sessionId!;
+      expect(transport.sessionIds, contains(id));
+
+      Future<int> del() async => (await http.delete(
         endpoint,
-        headers: {'Authorization': 'Bearer $token'},
+        headers: {'Authorization': 'Bearer $token', sessionHeader: id},
+      )).statusCode;
+
+      expect(await del(), anyOf(200, 204));
+      expect(transport.sessionIds, isNot(contains(id)));
+      // A client retrying its shutdown must not have to special-case the
+      // second attempt.
+      expect(await del(), anyOf(200, 204));
+    });
+
+    test('a session is dropped once it goes idle', () async {
+      final idle = McpTransport(
+        onSession: () => buildMcpServer(const []),
+        bearerToken: token,
+        idleTimeout: const Duration(milliseconds: 50),
       );
-      expect(r.statusCode, anyOf(200, 204));
+      final port = await idle.start();
+      addTearDown(idle.stop);
+
+      final client = McpTestClient(
+        Uri.parse('http://127.0.0.1:$port$mcpPath'),
+        bearer: token,
+      );
+      await client.initialize();
+      expect(idle.sessionIds, isNotEmpty);
+
+      // Otherwise an agent that exits without a DELETE leaks its session, and
+      // with it the tools closing over the Store, until the app quits.
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(idle.sessionIds, isEmpty);
     });
   });
 
@@ -295,4 +408,80 @@ void main() {
       expect(jsonDecode(file.readAsStringSync())['port'], 2222);
     });
   });
+}
+
+// Failure arms of the front door: a session factory that throws, the session
+// cap, and a GET naming a session that does not exist.
+void transportFailureTests() {
+  test(
+    'a session factory that throws becomes a 500, not a dropped socket',
+    () async {
+      // buildMcpServer runs per session and touches the Store; if it throws,
+      // the client must get an answer rather than a connection reset.
+      final broken = McpTransport(
+        onSession: () => throw StateError('session factory exploded'),
+        bearerToken: token,
+      );
+      final port = await broken.start();
+      addTearDown(broken.stop);
+
+      final r = await http.post(
+        Uri.parse('http://127.0.0.1:$port$mcpPath'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer $token',
+        },
+        body: jsonEncode(
+          rpc('initialize', params: {'protocolVersion': mcpProtocolVersion}),
+        ),
+      );
+      expect(r.statusCode, 500);
+      // The failure text is redacted on the way out, like every other body.
+      expect(r.body, isNotEmpty);
+    },
+  );
+
+  test('the session cap refuses further sessions rather than growing without '
+      'limit', () async {
+    final clients = <McpTestClient>[];
+    for (var i = 0; i < mcpMaxSessions; i++) {
+      final c = McpTestClient(endpoint, bearer: token);
+      await c.initialize();
+      clients.add(c);
+    }
+    addTearDown(() async {
+      for (final c in clients) {
+        await c.close();
+      }
+    });
+    expect(transport.sessionIds, hasLength(mcpMaxSessions));
+
+    final overflow = await http.post(
+      endpoint,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
+      body: jsonEncode(
+        rpc('initialize', params: {'protocolVersion': mcpProtocolVersion}),
+      ),
+    );
+    expect(overflow.statusCode, 503);
+  });
+
+  test(
+    'a GET naming an unknown session is 404, not a stream to nowhere',
+    () async {
+      final client = HttpClient();
+      addTearDown(() => client.close(force: true));
+      final request = await client.getUrl(endpoint);
+      request.headers.set('Authorization', 'Bearer $token');
+      request.headers.set('Accept', 'text/event-stream');
+      request.headers.set(sessionHeader, 'no-such-session');
+      final response = await request.close();
+
+      expect(response.statusCode, 404);
+      await response.drain<void>();
+    },
+  );
 }

@@ -19,22 +19,47 @@ class RegistryResult {
   final String? repoUrl;
 }
 
-Uri registryUrl(WatchKind kind, String displayName) {
+/// Where a registry kind is fetched from, and how its body is read.
+///
+/// One switch rather than two. Splitting the URL and the parser across
+/// separate switches over the same enum meant a new registry kind had to be
+/// added in both, and it left the parser switch with a github/rss arm that
+/// could never run — this function has already thrown for those kinds before
+/// a body exists to parse.
+typedef _RegistrySpec = ({Uri url, RegistryResult Function(String body) parse});
+
+_RegistrySpec _registrySpec(WatchKind kind, String displayName) {
   switch (kind) {
     case WatchKind.pub:
-      return Uri.parse('https://pub.dev/api/packages/$displayName');
+      return (
+        url: Uri.parse('https://pub.dev/api/packages/$displayName'),
+        parse: _pub,
+      );
     case WatchKind.npm:
       // A scoped name's slash must stay encoded or the registry 404s.
-      return Uri.parse(
-        'https://registry.npmjs.org/${displayName.replaceAll('/', '%2F')}',
+      return (
+        url: Uri.parse(
+          'https://registry.npmjs.org/${displayName.replaceAll('/', '%2F')}',
+        ),
+        parse: _npm,
       );
     case WatchKind.crates:
-      return Uri.parse('https://crates.io/api/v1/crates/$displayName');
+      return (
+        url: Uri.parse('https://crates.io/api/v1/crates/$displayName'),
+        parse: _crates,
+      );
     case WatchKind.pypi:
-      return Uri.parse('https://pypi.org/pypi/$displayName/json');
+      return (
+        url: Uri.parse('https://pypi.org/pypi/$displayName/json'),
+        parse: _pypi,
+      );
     case WatchKind.go:
-      return Uri.parse(
-        'https://proxy.golang.org/${goProxyPath(displayName)}/@v/list',
+      return (
+        url: Uri.parse(
+          'https://proxy.golang.org/${goProxyPath(displayName)}/@v/list',
+        ),
+        // _go needs the module path to build each version's .info URL.
+        parse: (body) => _go(body, displayName),
       );
     case WatchKind.github:
     case WatchKind.rss:
@@ -42,29 +67,18 @@ Uri registryUrl(WatchKind kind, String displayName) {
   }
 }
 
+/// The endpoint a registry kind is read from.
+Uri registryUrl(WatchKind kind, String displayName) =>
+    _registrySpec(kind, displayName).url;
+
 /// Reads the version list and best-effort repository URL for [watch] from
 /// its registry. Uses `watch.displayName`, never `watch.name`: canonical
 /// names are deliberately lossy (crates.io's `serde_json` canonicalizes to
 /// `serde-json`, which 404s), so the wire form must be the original string.
 Future<RegistryResult> fetchRegistry(Net net, Watch watch) async {
-  final url = registryUrl(watch.kind, watch.displayName);
-  final response = await net.get(url);
-
-  switch (watch.kind) {
-    case WatchKind.pub:
-      return _pub(response.body);
-    case WatchKind.npm:
-      return _npm(response.body);
-    case WatchKind.crates:
-      return _crates(response.body);
-    case WatchKind.pypi:
-      return _pypi(response.body);
-    case WatchKind.go:
-      return _go(response.body, watch.displayName);
-    case WatchKind.github:
-    case WatchKind.rss:
-      throw ArgumentError.value(watch.kind, 'kind', 'not a package registry');
-  }
+  final spec = _registrySpec(watch.kind, watch.displayName);
+  final response = await net.get(spec.url);
+  return spec.parse(response.body);
 }
 
 Map<String, dynamic> _json(String body) {
@@ -86,13 +100,30 @@ final DateTime _publishedAtFallback = DateTime.utc(1970);
 /// Sorts [versions] oldest-first by `publishedAt`, breaking ties (including
 /// entries that share the [_publishedAtFallback] fallback) by `compareVersions` so the
 /// order is fully deterministic and `.last` is always the genuinely newest.
+///
+/// `compareVersions` sorts a malformed version string strictly below any
+/// version it parsed cleanly, independent of either version's numbers. So
+/// when a tie is broken between a malformed entry (e.g. a registry tag like
+/// `"nightly"`) and a well-formed one, the malformed entry always loses —
+/// even against a low clean version like `"0.0.1"` — because a string that
+/// isn't a real version can never be the "genuinely newest" one. This is the
+/// intended guarantee, not an accidental side effect of the tiebreak.
+///
+/// Two *mutually* malformed strings compare equal under `compareVersions`, and
+/// Dart's [List.sort] is not stable, so without a final tiebreak their order
+/// would be genuinely undefined — `.last` could flip between runs on identical
+/// input, and `.last` is what becomes `lastSeenVersion`. The string comparison
+/// below is arbitrary but total, which is the point: it makes the result
+/// reproducible rather than meaningful.
 void _sortByPublishedAt(List<VersionInfo> versions) {
   versions.sort((a, b) {
     final timeCmp = (a.publishedAt ?? _publishedAtFallback).compareTo(
       b.publishedAt ?? _publishedAtFallback,
     );
     if (timeCmp != 0) return timeCmp;
-    return compareVersions(a.version, b.version);
+    final versionCmp = compareVersions(a.version, b.version);
+    if (versionCmp != 0) return versionCmp;
+    return a.version.compareTo(b.version);
   });
 }
 

@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Nothing here writes to the repository. Declared explicitly rather than left
+# to the repository default, which on older repos is read-write on every scope
+# — a token these jobs hand to third-party build code (pub, cmake, gradle) for
+# no reason.
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Format and analyze
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-flutter
+      - name: Check formatting
+        run: dart format --output=none --set-exit-if-changed .
+      - name: Analyze
+        run: flutter analyze --fatal-infos
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows works because test/flutter_test_config.dart points
+        # package:sqlite3 at the DLL vendored under third_party/. Linux and
+        # macOS runners provide a system SQLite and need no such help.
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install sqlite3 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsqlite3-dev
+
+      # The vendored DLL is a prebuilt binary that a reviewer cannot read in a
+      # diff, so the checksum recorded beside it is verified rather than
+      # trusted. Without this the README's hash is documentation, not a gate.
+      - name: Verify vendored sqlite3 (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd third_party/sqlite3/windows-x64
+          sha256sum -c sqlite3.dll.sha256
+
+      - uses: ./.github/actions/setup-flutter
+      - run: flutter test
+
+  build:
+    name: Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux
+          - os: macos-latest
+            target: macos
+          - os: windows-latest
+            target: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libsqlite3-dev \
+            libsecret-1-dev libjsoncpp-dev
+
+      - uses: ./.github/actions/setup-flutter
+      - run: flutter build ${{ matrix.target }} --release
+
+  flatpak:
+    name: Flatpak (build, resolve, launch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libsqlite3-dev \
+            libsecret-1-dev libjsoncpp-dev
+
+      - uses: ./.github/actions/setup-flutter
+      - run: flutter build linux --release
+
+      # The same gates release.yml runs, on the pull request that changes
+      # packaging rather than for the first time on a tag. Neither can be run
+      # on a developer machine whose glibc is newer than the runtime's, which
+      # a rolling distro guarantees — so CI is the only place they get to run
+      # at all.
+      - name: Build and verify the Flatpak
+        uses: ./.github/actions/flatpak-verify
+        with:
+          runtime-version: '50'

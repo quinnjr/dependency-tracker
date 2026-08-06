@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Dependency Tracker
+GenericName=Dependency Version Tracker
+Comment=Watch project dependencies for new releases across pub.dev, npm, crates.io, PyPI, Go and GitHub
+Exec=deptracker
+Icon=dev.quinnjr.deptracker
+Terminal=false
+Categories=Development;
+Keywords=dependency;version;package;release;update;mcp;
+StartupNotify=true
+StartupWMClass=dev.quinnjr.deptracker

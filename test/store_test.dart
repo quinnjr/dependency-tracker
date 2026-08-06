@@ -1,7 +1,11 @@
+import 'dart:io';
+
 import 'package:deptracker/models.dart';
 import 'package:deptracker/store.dart';
 import 'package:deptracker/versions.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+import 'package:sqlite3/sqlite3.dart';
 
 /// Builds a resolved, non-dev [Usage] pinned to `1.0.0` in `pubspec.lock`,
 /// varying only [watchId] and [projectPath] — the two fields that actually
@@ -16,6 +20,25 @@ Usage _usage(int watchId, String projectPath) => Usage(
 );
 
 void main() {
+  openAndBookkeepingTests();
+  // upsertWatch folds its insert and id lookup into one round trip with
+  // `RETURNING`, which SQLite only supports from 3.35. That floor was
+  // documented in store.dart as being covered by a check in this file, and
+  // the check did not exist — so the constraint rested on a citation.
+  //
+  // It runs on every platform deliberately: Linux and macOS take SQLite from
+  // the system (a floating apt/system library), and Windows takes it from the
+  // vendored DLL, so all three can drift below the floor independently.
+  test('the linked SQLite supports RETURNING, which upsertWatch requires', () {
+    expect(
+      sqlite3.version.versionNumber,
+      greaterThanOrEqualTo(3035000),
+      reason:
+          'upsertWatch uses RETURNING (SQLite >= 3.35); '
+          'loaded ${sqlite3.version.libVersion}',
+    );
+  });
+
   late Store store;
 
   setUp(() => store = Store.openInMemory());
@@ -384,7 +407,8 @@ void main() {
     expect(notified, 2);
   });
 
-  test('metaSet notifies listeners, like every other public mutator', () {
+  test('metaSet notifies listeners, unlike putCache, its http_cache '
+      'counterpart', () {
     var notified = 0;
     store.addListener(() => notified++);
     store.metaSet('some_key', 'some_value');
@@ -712,5 +736,66 @@ void main() {
       ]),
       0,
     );
+  });
+}
+
+// Paths nothing reached: the file-backed constructor (every test uses the
+// in-memory one), dispose, the rollback arm, and metaGet.
+void openAndBookkeepingTests() {
+  test('open() creates and migrates a database on disk', () async {
+    // Every other test uses openInMemory, so the constructor the app itself
+    // calls — the one that has to create the file and run migrations against
+    // real storage — was never exercised.
+    final dir = await Directory.systemTemp.createTemp('deptracker_store');
+    addTearDown(() => dir.delete(recursive: true));
+    final path = p.join(dir.path, 'nested', 'watches.db');
+    Directory(p.dirname(path)).createSync(recursive: true);
+
+    final store = Store.open(path);
+    final id = store.upsertWatch(WatchKind.pub, 'http');
+    store.close();
+
+    expect(File(path).existsSync(), isTrue);
+
+    // Reopening proves the migration wrote a durable schema rather than
+    // leaving the file usable only for the session that made it.
+    final reopened = Store.open(path);
+    expect(reopened.watchById(id)!.displayName, 'http');
+    expect(reopened.metaGet('schema_version'), isNotNull);
+    reopened.close();
+  });
+
+  test('metaGet returns null for a key that was never set', () {
+    final s = Store.openInMemory();
+    addTearDown(s.close);
+    expect(s.metaGet('never-written'), isNull);
+    s.metaSet('written', 'yes');
+    expect(s.metaGet('written'), 'yes');
+  });
+
+  test('dispose closes the database', () {
+    final s = Store.openInMemory();
+    s.upsertWatch(WatchKind.pub, 'http');
+    s.dispose();
+    // A closed store must fail loudly rather than appear to work.
+    expect(() => s.watches(), throwsA(anything));
+  });
+
+  test('close is idempotent, so dispose after close does not double-free', () {
+    final s = Store.openInMemory();
+    s.close();
+    expect(s.close, returnsNormally);
+  });
+
+  test('markUnattemptedStale rolls back rather than half-applying', () {
+    final s = Store.openInMemory();
+    final a = s.upsertWatch(WatchKind.pub, 'aaa');
+    s.close();
+
+    // A closed database makes the batched UPDATE throw part-way through the
+    // transaction. The rollback arm has to run and the error has to reach the
+    // caller, which is what lets refreshAll report staleMarkingFailed instead
+    // of silently losing the marking.
+    expect(() => s.markUnattemptedStale([a], 'stale'), throwsA(anything));
   });
 }

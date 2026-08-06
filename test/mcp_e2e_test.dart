@@ -18,6 +18,8 @@ import 'package:deptracker/store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
+import 'mcp_client.dart';
+
 const _token = 'e2e-test-token-0123456789abcdef';
 
 late Store store;
@@ -53,7 +55,7 @@ void main() {
   setUp(() async {
     store = Store.openInMemory();
     transport = McpTransport(
-      server: McpServer(buildTools(store, refresh: _noopRefresh)),
+      onSession: () => buildMcpServer(buildTools(store, refresh: _noopRefresh)),
       bearerToken: _token,
     );
     final port = await transport.start();
@@ -82,10 +84,12 @@ void main() {
   );
 
   test('tools/list returns all ten tools this server implements', () async {
-    final r = await _post(_rpc('tools/list'));
-    expect(r.statusCode, 200);
-    final body = jsonDecode(r.body) as Map<String, Object?>;
-    final tools = (body['result'] as Map)['tools'] as List;
+    final client = McpTestClient(endpoint, bearer: _token);
+    addTearDown(client.close);
+    await client.initialize();
+
+    final body = await client.call('tools/list');
+    final tools = (body['result']! as Map)['tools'] as List;
     final names = tools.map((t) => (t as Map)['name'] as String).toSet();
     expect(names, {
       'list_watches',
@@ -140,19 +144,14 @@ void main() {
       // instance — main.dart wires it that way deliberately.
       expect(store.watches(), isEmpty);
 
-      final r = await _post(
-        _rpc('tools/call', {
-          'name': 'add_watch',
-          'arguments': {'kind': 'pub', 'name': 'http'},
-        }),
-      );
-      expect(r.statusCode, 200);
-      final body = jsonDecode(r.body) as Map<String, Object?>;
-      final result = body['result'] as Map<String, Object?>;
-      expect(result['isError'], isFalse);
+      final client = McpTestClient(endpoint, bearer: _token);
+      addTearDown(client.close);
+      await client.initialize();
 
-      final text = (result['content'] as List).first['text'] as String;
-      final id = (jsonDecode(text) as Map<String, Object?>)['id'] as int;
+      final added =
+          await client.callTool('add_watch', {'kind': 'pub', 'name': 'http'})
+              as Map<String, Object?>;
+      final id = added['id']! as int;
 
       final watch = store.watchById(id);
       expect(watch, isNotNull);
@@ -169,21 +168,20 @@ void main() {
     // the handler. That must come back as a normal (200, isError: true)
     // result the model can read, not a broken connection, and the very
     // next call on the same server must still succeed.
-    final failing = await _post(
-      _rpc('tools/call', {
-        'name': 'get_watch',
-        'arguments': <String, Object?>{},
-      }),
-    );
-    expect(failing.statusCode, 200);
-    final failingBody = jsonDecode(failing.body) as Map<String, Object?>;
-    final failingResult = failingBody['result'] as Map<String, Object?>;
-    expect(failingResult['isError'], isTrue);
+    final client = McpTestClient(endpoint, bearer: _token);
+    addTearDown(client.close);
+    await client.initialize();
 
-    final following = await _post(_rpc('tools/list'));
-    expect(following.statusCode, 200);
-    final followingBody = jsonDecode(following.body) as Map<String, Object?>;
-    expect((followingBody['result'] as Map)['tools'], hasLength(10));
+    final failing = await client.call(
+      'tools/call',
+      params: {'name': 'get_watch', 'arguments': <String, Object?>{}},
+    );
+    final result = failing['result']! as Map<String, Object?>;
+    expect(result['isError'], isTrue);
+
+    // The same session must still serve the next call.
+    final following = await client.call('tools/list', id: 2);
+    expect((following['result']! as Map)['tools'], hasLength(10));
   });
 
   group('discovery file', () {

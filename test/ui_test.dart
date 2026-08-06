@@ -51,6 +51,7 @@ int seed({
 }
 
 void main() {
+  detailPaneTests();
   setUp(() {
     store = Store.openInMemory();
     refreshCount = 0;
@@ -266,5 +267,126 @@ void main() {
     await tester.tap(find.byIcon(Icons.settings));
     await tester.pumpAndSettle();
     expect(find.text('settings pane'), findsOneWidget);
+  });
+}
+
+// Detail-pane controls and states nothing opened: snooze, the error banner,
+// the no-usages case, release dates, and the per-release Read button.
+void detailPaneTests() {
+  testWidgets('a snoozed watch shows a snooze icon in the list', (
+    tester,
+  ) async {
+    // Without it a snoozed watch is indistinguishable from one that simply
+    // has no news, and the user cannot tell why it stopped appearing under
+    // the Unread filter.
+    final id = seed(name: 'http', releases: ['2.0.0']);
+    store.snooze(id, DateTime.now().toUtc().add(const Duration(days: 7)));
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.snooze), findsOneWidget);
+  });
+
+  testWidgets('snoozing from the detail pane hides the watch from Unread', (
+    tester,
+  ) async {
+    seed(name: 'http', releases: ['2.0.0']);
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('http'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(TextButton, 'Snooze 30d'));
+    await tester.pumpAndSettle();
+
+    // Snoozing is a store mutation, so it must land in the database rather
+    // than only in widget state.
+    final watch = store.watches().single;
+    expect(watch.snoozedUntil, isNotNull);
+    expect(watch.snoozedUntil!.isAfter(DateTime.now().toUtc()), isTrue);
+  });
+
+  testWidgets('a refresh error is surfaced in the detail pane', (tester) async {
+    // Otherwise a watch that has been failing for weeks looks identical to
+    // one that is simply quiet.
+    final id = seed(name: 'http');
+    store.setWatchMeta(id, lastError: 'pub.dev: 500 Internal Server Error');
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('http'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Last refresh failed:'), findsOneWidget);
+    expect(find.textContaining('500 Internal Server Error'), findsOneWidget);
+  });
+
+  testWidgets('a watch no project depends on says so instead of showing an '
+      'empty list', (tester) async {
+    // Manually added watches, and watches whose last consumer was removed,
+    // both land here.
+    final id = store.upsertWatch(WatchKind.pub, 'orphan');
+    store.insertReleases(id, [Release(watchId: id, version: '1.0.0')]);
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('orphan'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('No scanned project depends on this.'), findsOneWidget);
+  });
+
+  testWidgets('a release shows its publish date', (tester) async {
+    final id = seed(name: 'http');
+    store.insertReleases(id, [
+      Release(
+        watchId: id,
+        version: '2.0.0',
+        publishedAt: DateTime.utc(2024, 6, 1, 12, 30),
+      ),
+    ]);
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('http'));
+    await tester.pumpAndSettle();
+
+    // Date only: the time of day is noise for a release list.
+    expect(find.text('2024-06-01'), findsOneWidget);
+  });
+
+  testWidgets('the per-release Read button marks only that release', (
+    tester,
+  ) async {
+    final id = seed(name: 'http');
+    store.insertReleases(id, [
+      Release(watchId: id, version: '2.0.0'),
+      Release(watchId: id, version: '3.0.0'),
+    ]);
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('http'));
+    await tester.pumpAndSettle();
+
+    // Two unread releases, so two Read buttons.
+    expect(find.widgetWithText(TextButton, 'Read'), findsNWidgets(2));
+
+    await tester.tap(find.widgetWithText(TextButton, 'Read').first);
+    await tester.pumpAndSettle();
+
+    final unread = store.releasesFor(id).where((r) => !r.read).toList();
+    expect(unread, hasLength(1), reason: 'only one release should be read');
+    // And the remaining button belongs to the one still unread.
+    expect(find.widgetWithText(TextButton, 'Read'), findsOneWidget);
+  });
+
+  testWidgets('a watch with no releases shows the empty-releases note', (
+    tester,
+  ) async {
+    final id = store.upsertWatch(WatchKind.pub, 'brandnew');
+    expect(store.releasesFor(id), isEmpty);
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('brandnew'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Nothing fetched yet.'), findsOneWidget);
   });
 }

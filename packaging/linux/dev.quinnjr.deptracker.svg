@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2d3b55"/>
+      <stop offset="1" stop-color="#1b2334"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#bg)"/>
+
+  <!-- dependency edges: one root fanning out to three children, one of which
+       has a child of its own -->
+  <g stroke="#5b7fb8" stroke-width="5" stroke-linecap="round" fill="none">
+    <path d="M64 40 L36 68"/>
+    <path d="M64 40 L64 68"/>
+    <path d="M64 40 L92 68"/>
+    <path d="M92 68 L92 94"/>
+  </g>
+
+  <!-- root -->
+  <circle cx="64" cy="40" r="12" fill="#8ab4f8"/>
+  <!-- dependencies -->
+  <circle cx="36" cy="68" r="9" fill="#5b7fb8"/>
+  <circle cx="64" cy="68" r="9" fill="#5b7fb8"/>
+  <circle cx="92" cy="68" r="9" fill="#5b7fb8"/>
+  <!-- transitive dependency, flagged as having an update available -->
+  <circle cx="92" cy="94" r="9" fill="#7ee2a8"/>
+</svg>

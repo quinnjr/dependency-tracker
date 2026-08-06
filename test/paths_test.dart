@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
 void main() {
+  homeFallbackTests();
   test('linux honours XDG variables when set', () {
     final env = {
       'HOME': '/home/j',
@@ -165,5 +166,71 @@ void main() {
       final result = ensureDir(target);
       expect(result.existsSync(), isTrue);
     });
+  });
+}
+
+// Windows fallbacks and the no-home failure, none of which the happy-path
+// tests reach. Getting these wrong means the database silently lands
+// somewhere the user does not back up.
+void homeFallbackTests() {
+  test(
+    'windows falls back to HOMEDRIVE + HOMEPATH when USERPROFILE is absent',
+    () {
+      final dir = dataDir(
+        platform: 'windows',
+        env: {'HOMEDRIVE': r'C:', 'HOMEPATH': r'\Users\joseph'},
+      );
+      expect(dir, r'C:\Users\joseph\AppData\Local\deptracker');
+    },
+  );
+
+  test('windows prefers USERPROFILE over the HOMEDRIVE pair', () {
+    final dir = dataDir(
+      platform: 'windows',
+      env: {
+        'USERPROFILE': r'D:\profiles\joseph',
+        'HOMEDRIVE': r'C:',
+        'HOMEPATH': r'\Users\wrong',
+      },
+    );
+    expect(dir, startsWith(r'D:\profiles\joseph'));
+  });
+
+  test(
+    'windows falls back to the home dir when LOCALAPPDATA is not absolute',
+    () {
+      // The XDG rule the posix branch follows — a relative value is treated as
+      // unset — applies here too, or the database lands somewhere relative to
+      // the working directory.
+      final dir = dataDir(
+        platform: 'windows',
+        env: {
+          'USERPROFILE': r'C:\Users\joseph',
+          'LOCALAPPDATA': r'relative\path',
+        },
+      );
+      expect(dir, r'C:\Users\joseph\AppData\Local\deptracker');
+    },
+  );
+
+  test('a half-set HOMEDRIVE pair is not accepted as a home directory', () {
+    // HOMEDRIVE without HOMEPATH would otherwise build "C:deptracker".
+    expect(
+      () => dataDir(platform: 'windows', env: {'HOMEDRIVE': r'C:'}),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  test('no home directory at all is a StateError naming the platform', () {
+    expect(
+      () => dataDir(platform: 'linux', env: const {}),
+      throwsA(
+        isA<StateError>().having(
+          (e) => e.message,
+          'message',
+          contains('linux'),
+        ),
+      ),
+    );
   });
 }

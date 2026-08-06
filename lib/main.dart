@@ -15,6 +15,12 @@ import 'store.dart';
 import 'ui/app.dart';
 import 'ui/settings.dart';
 
+// Everything below assembles real resources: the database at the user's data
+// path, the OS keyring, and a listening socket. A test that ran it would touch
+// the developer's own watchlist and keyring, so it is excluded rather than
+// faked — the widget it builds (TrackerApp) and every collaborator it wires
+// are injectable and are covered by test/main_test.dart.
+// coverage:ignore-start
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -42,7 +48,10 @@ Future<void> main() async {
   try {
     final token = await secrets.mcpToken();
     transport = McpTransport(
-      server: McpServer(buildTools(store, refresh: refresh)),
+      // A factory, not an instance: every MCP session gets its own server, and
+      // the tools close over the live [store] so a session opened an hour ago
+      // still reads current data.
+      onSession: () => buildMcpServer(buildTools(store, refresh: refresh)),
       bearerToken: token,
     );
     mcpPort = await transport.start();
@@ -73,6 +82,8 @@ Future<String?> _githubTokenOrNull(Secrets secrets) async {
     return null;
   }
 }
+
+// coverage:ignore-end
 
 class TrackerApp extends StatefulWidget {
   const TrackerApp({

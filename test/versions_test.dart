@@ -2,6 +2,7 @@ import 'package:deptracker/versions.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  devAndPreIdentifierTests();
   test('numeric segments compare numerically, not lexically', () {
     expect(compareVersions('1.9.0', '1.10.0'), lessThan(0));
     expect(compareVersions('1.0.0', '1.0.1'), lessThan(0));
@@ -81,5 +82,36 @@ void main() {
     expect(newestVersion(['nightly', 'latest']), isNotNull);
     expect(newestVersion(['nightly', '1.0.0']), '1.0.0');
     expect(newestVersion(const <String>[]), isNull);
+  });
+}
+
+// The dev-suffix tiebreak and the numeric-vs-alphanumeric prerelease rule,
+// both of which decide which release is "newest" and so which one the user is
+// told about.
+void devAndPreIdentifierTests() {
+  test('a dev suffix sorts below the otherwise-equal version', () {
+    // PEP 440: 1.0a1.dev1 precedes 1.0a1. Getting this backwards would
+    // present a dev build as the newest release.
+    expect(compareVersions('1.0a1.dev1', '1.0a1'), lessThan(0));
+    expect(compareVersions('1.0a1', '1.0a1.dev1'), greaterThan(0));
+  });
+
+  test('two dev suffixes compare numerically', () {
+    expect(compareVersions('1.0a1.dev1', '1.0a1.dev2'), lessThan(0));
+    expect(compareVersions('1.0a1.dev2', '1.0a1.dev1'), greaterThan(0));
+    expect(compareVersions('1.0a1.dev2', '1.0a1.dev2'), 0);
+  });
+
+  test('a dev suffix on a post-release also sorts below', () {
+    expect(compareVersions('1.0.post1.dev1', '1.0.post1'), lessThan(0));
+  });
+
+  test('a numeric prerelease identifier sorts below an alphanumeric one', () {
+    // Semver: identifiers consisting only of digits compare numerically and
+    // rank below those with letters.
+    expect(compareVersions('1.0.0-1', '1.0.0-alpha'), lessThan(0));
+    expect(compareVersions('1.0.0-alpha', '1.0.0-1'), greaterThan(0));
+    // And numeric ones compare as numbers, not strings.
+    expect(compareVersions('1.0.0-alpha.9', '1.0.0-alpha.10'), lessThan(0));
   });
 }
