@@ -207,7 +207,7 @@ jobs:
           The macOS and Windows builds are unsigned, so Gatekeeper and
           SmartScreen will warn on first launch.
 
-          ### Upgrading on Linux from a build before 1.0.0
+          ### Coming from an earlier development build on Linux
 
           The application id changed from `ai.lexmata.deptracker` to
           `dev.quinnjr.deptracker`. Secrets in the login keyring are namespaced
