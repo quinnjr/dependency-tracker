@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>WordPress-style feed</title>
+    <item>
+      <title>Real post</title>
+      <atom:link rel="self" href="https://example.com/self"/>
+      <link>https://example.com/real</link>
+      <guid>https://example.com/real</guid>
+      <pubDate>Wed, 01 Jul 2026 12:00:00 GMT</pubDate>
+      <description>Content.</description>
+    </item>
+    <item>
+      <title>Second post</title>
+      <link></link>
+      <link>https://example.com/second</link>
+      <guid>https://example.com/second</guid>
+      <pubDate>Thu, 02 Jul 2026 12:00:00 GMT</pubDate>
+      <description>More content.</description>
+    </item>
+  </channel>
+</rss>

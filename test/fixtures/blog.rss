@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Flutter Release Notes</title>
+    <item>
+      <title>Flutter 3.44 released</title>
+      <link>https://example.com/flutter-3-44</link>
+      <guid>https://example.com/flutter-3-44</guid>
+      <pubDate>Mon, 08 Jul 2026 15:02:06 -0700</pubDate>
+      <description>&lt;p&gt;Impeller on by default.&lt;/p&gt;</description>
+    </item>
+    <item>
+      <title>Flutter 3.43 released</title>
+      <link>https://example.com/flutter-3-43</link>
+      <pubDate>Tue, 03 Jun 2026 09:00:00 GMT</pubDate>
+      <description>Older news.</description>
+    </item>
+  </channel>
+</rss>

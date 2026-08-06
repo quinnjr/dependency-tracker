@@ -1,0 +1,11 @@
+# Checksum manifests are parsed by sha256sum, which treats a trailing CR as
+# part of the filename. Git's autocrlf on Windows would otherwise rewrite these
+# on checkout and every verification would fail with "sqlite3.dll\r: No such
+# file or directory".
+*.sha256 text eol=lf
+
+# Never let line-ending conversion touch a binary.
+third_party/sqlite3/windows-x64/sqlite3.dll binary
+
+# Shell scripts and workflow YAML are read by bash on the Windows runners too.
+*.sh text eol=lf

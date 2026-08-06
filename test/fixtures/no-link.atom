@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>No link test</title>
+  <entry>
+    <id>tag:example.com,2026:2</id>
+    <title>v2.0.0</title>
+    <updated>2026-02-01T00:00:00Z</updated>
+  </entry>
+</feed>

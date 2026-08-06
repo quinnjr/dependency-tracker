@@ -1,0 +1,72 @@
+# Flatpak manifest for Dependency Tracker.
+#
+# This packages a *prebuilt* Flutter bundle rather than building Flutter inside
+# the sandbox: the Flutter SDK is not available as a Flatpak SDK extension, so
+# the bundle is produced by `flutter build linux --release` first and copied in
+# here. Build it with:
+#
+#   flutter build linux --release
+#   flatpak-builder --force-clean .flatpak-build packaging/flatpak/dev.quinnjr.deptracker.yml
+#
+# The bundle is copied as-is with no freshness check, so re-run the build above
+# first — otherwise this happily packages a stale one.
+#
+# Revisit if a Flutter SDK extension ever appears on Flathub: building in the
+# sandbox would remove the glibc coupling that the ubuntu-24.04 pin and the ldd
+# gate in .github/workflows/release.yml exist to manage.
+#
+# org.gnome.Platform is used rather than org.freedesktop.Platform because the
+# Flutter Linux shell links against GTK 3, which the freedesktop runtime does
+# not ship.
+app-id: dev.quinnjr.deptracker
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: deptracker
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Registry lookups (pub.dev, npm, crates.io, PyPI, Go, GitHub) and the
+  # loopback MCP server both need the network.
+  - --share=network
+  # The GitHub PAT and the MCP token are kept in the login keyring via
+  # flutter_secure_storage, which talks to the Secret Service API.
+  - --talk-name=org.freedesktop.secrets
+  # The app scans project manifests wherever the user keeps their repositories,
+  # and the directory picker can point anywhere under $HOME. Read-only: the
+  # app only ever reads manifests, and its own writable state (the SQLite
+  # database, the MCP discovery file) lives under XDG paths that Flatpak
+  # redirects into ~/.var/app/dev.quinnjr.deptracker/ and can write without
+  # this grant. Read-write would put ~/.ssh and ~/.bashrc within reach of any
+  # bug in a parser fed by attacker-controlled registry payloads.
+  - --filesystem=home:ro
+
+modules:
+  - name: deptracker
+    buildsystem: simple
+    build-commands:
+      # The Flutter runner resolves its data/ and lib/ directories relative to
+      # the real path of the executable ($ORIGIN), so the bundle has to stay
+      # intact as a unit; /app/bin/deptracker is a symlink into it.
+      - mkdir -p /app/deptracker
+      - cp -r bundle/. /app/deptracker/
+      - chmod 755 /app/deptracker/deptracker
+      - mkdir -p /app/bin
+      - ln -s /app/deptracker/deptracker /app/bin/deptracker
+
+      - install -Dm644 dev.quinnjr.deptracker.desktop
+        /app/share/applications/dev.quinnjr.deptracker.desktop
+      - install -Dm644 dev.quinnjr.deptracker.metainfo.xml
+        /app/share/metainfo/dev.quinnjr.deptracker.metainfo.xml
+      - install -Dm644 dev.quinnjr.deptracker.svg
+        /app/share/icons/hicolor/scalable/apps/dev.quinnjr.deptracker.svg
+    sources:
+      # Produced by `flutter build linux --release`; contributes bundle/.
+      - type: dir
+        path: ../../build/linux/x64/release
+      # Contributes the .desktop, .metainfo.xml and .svg alongside it.
+      - type: dir
+        path: ../linux

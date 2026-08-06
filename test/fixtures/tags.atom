@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Tags from tiny-lib</title>
+  <entry>
+    <id>tag:github.com,2008:Repository/99/v0.4.0</id>
+    <title>v0.4.0</title>
+    <updated>2024-07-01T00:00:00Z</updated>
+    <link rel="alternate" type="text/html"
+          href="https://github.com/me/tiny-lib/releases/tag/v0.4.0"/>
+  </entry>
+</feed>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF
+    xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns="http://purl.org/rss/1.0/">
+  <channel rdf:about="https://example.com/cve-feed">
+    <title>CVE Feed</title>
+    <link>https://example.com/cve-feed</link>
+  </channel>
+  <item rdf:about="https://example.com/cve/CVE-2026-1234">
+    <title>CVE-2026-1234</title>
+    <link>https://example.com/cve/CVE-2026-1234</link>
+    <dc:date>2026-07-15T00:00:00Z</dc:date>
+    <description>Critical vulnerability in libfoo.</description>
+  </item>
+  <item rdf:about="https://example.com/cve/CVE-2026-5678">
+    <title>CVE-2026-5678</title>
+    <link>https://example.com/cve/CVE-2026-5678</link>
+    <dc:date>2026-07-10T00:00:00Z</dc:date>
+    <description>Moderate issue in libbar.</description>
+  </item>
+</rdf:RDF>
