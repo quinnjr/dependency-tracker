@@ -1,0 +1,695 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>deptracker — dependency drift across your repos</title>
+<meta name="description" content="A desktop tracker for dependency versions across your repositories: one row per package, showing every version your own projects pin it at.">
+<meta name="color-scheme" content="light dark">
+</head>
+<body>
+<style>
+  :root {
+    --paper: #e7ece8;
+    --raised: #eef2ef;
+    --ink: #101614;
+    --slate: #55655e;
+    --rule: #bfcbc4;
+    --behind: #8a6510;
+    --behind-mark: #b4881a;
+    --current: #2c5a48;
+
+    --serif: Georgia, "Liberation Serif", "DejaVu Serif", "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, "DejaVu Sans Mono", "Cascadia Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+    --measure: 68ch;
+    --gutter: clamp(1.25rem, 5vw, 4rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0e1412;
+      --raised: #141c19;
+      --ink: #e4eae6;
+      --slate: #93a39b;
+      --rule: #26302c;
+      --behind: #d9a82e;
+      --behind-mark: #d9a82e;
+      --current: #6fb394;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper: #0e1412;
+    --raised: #141c19;
+    --ink: #e4eae6;
+    --slate: #93a39b;
+    --rule: #26302c;
+    --behind: #d9a82e;
+    --behind-mark: #d9a82e;
+    --current: #6fb394;
+  }
+
+  :root[data-theme="light"] {
+    --paper: #e7ece8;
+    --raised: #eef2ef;
+    --ink: #101614;
+    --slate: #55655e;
+    --rule: #bfcbc4;
+    --behind: #8a6510;
+    --behind-mark: #b4881a;
+    --current: #2c5a48;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 62rem;
+    margin: 0 auto;
+    padding: 0 var(--gutter);
+  }
+
+  /* ---- top bar ---- */
+
+  .bar {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 1.5rem 0 1.25rem;
+    border-bottom: 1px solid var(--rule);
+    flex-wrap: wrap;
+  }
+
+  .bar-name {
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    letter-spacing: 0.02em;
+  }
+
+  .bar-ver {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--slate);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .bar-spacer { flex: 1 1 auto; }
+
+  .bar-link {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--ink);
+    text-decoration: none;
+    border-bottom: 1px solid var(--behind-mark);
+    padding-bottom: 1px;
+  }
+
+  .bar-link:hover { color: var(--behind); }
+
+  /* ---- hero ---- */
+
+  .hero { padding: clamp(3rem, 9vw, 6.5rem) 0 clamp(2.5rem, 6vw, 4rem); }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--slate);
+    margin: 0 0 1.75rem;
+  }
+
+  .hero-pkg {
+    font-family: var(--serif);
+    font-weight: 700;
+    font-size: clamp(3.5rem, 13vw, 8rem);
+    line-height: 0.9;
+    letter-spacing: -0.035em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .hero-pkg .from {
+    display: block;
+    font-family: var(--mono);
+    font-weight: 400;
+    font-size: clamp(0.75rem, 1.6vw, 0.9rem);
+    letter-spacing: 0.06em;
+    color: var(--slate);
+    margin-top: 1.25rem;
+  }
+
+  /* ---- the axis: the signature ---- */
+
+  .axis-scroll {
+    overflow-x: auto;
+    margin-top: clamp(2.5rem, 7vw, 4.5rem);
+  }
+
+  .axis {
+    position: relative;
+    min-width: 34rem;
+    padding-top: 2.25rem;
+    padding-bottom: 7.75rem;
+  }
+
+  .axis-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 2.25rem;
+    height: 1px;
+    background: var(--rule);
+  }
+
+  .tick {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    text-align: center;
+  }
+
+  .tick-ver {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--slate);
+    white-space: nowrap;
+  }
+
+  .tick-stem {
+    width: 1px;
+    height: 0.6rem;
+    background: var(--rule);
+    margin: 0.35rem auto 0;
+  }
+
+  .pin {
+    position: absolute;
+    top: 2.25rem;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .pin-drop {
+    width: 1px;
+    background: var(--rule);
+  }
+
+  .pin-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--behind-mark);
+    margin-top: -1px;
+  }
+
+  .pin-repo {
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--ink);
+    margin-top: 0.5rem;
+    white-space: nowrap;
+  }
+
+  .pin-note {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--slate);
+    white-space: nowrap;
+  }
+
+  .latest .pin-dot {
+    background: transparent;
+    border: 1px solid var(--current);
+    width: 11px;
+    height: 11px;
+  }
+
+  .latest .pin-repo { color: var(--current); }
+
+  /* Delay is set per pin with --delay rather than :nth-of-type, which counts
+     every sibling div — the ticks share the tag, so nth-of-type silently
+     matched nothing and every pin animated at once. */
+  @media (prefers-reduced-motion: no-preference) {
+    .pin {
+      animation: settle 900ms cubic-bezier(0.16, 0.84, 0.3, 1) both;
+      animation-delay: var(--delay, 0ms);
+    }
+
+    @keyframes settle {
+      from { opacity: 0; transform: translateX(-50%) translateX(-2.5rem); }
+      to   { opacity: 1; transform: translateX(-50%) translateX(0); }
+    }
+  }
+
+  .verdict {
+    font-family: var(--serif);
+    font-size: clamp(1.35rem, 3.2vw, 2rem);
+    line-height: 1.3;
+    letter-spacing: -0.015em;
+    max-width: 34ch;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .verdict em {
+    font-style: normal;
+    color: var(--behind);
+  }
+
+  /* ---- generic section ---- */
+
+  .band { padding: clamp(3rem, 8vw, 5.5rem) 0; border-top: 1px solid var(--rule); }
+
+  .band-head {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin: 0 0 2.25rem;
+    flex-wrap: wrap;
+  }
+
+  .band-title {
+    font-family: var(--serif);
+    font-size: clamp(1.6rem, 3.6vw, 2.4rem);
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    line-height: 1.1;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .prose {
+    max-width: var(--measure);
+    color: var(--slate);
+    margin: 0;
+  }
+
+  .prose + .prose { margin-top: 1rem; }
+
+  .prose strong { color: var(--ink); font-weight: 600; }
+
+  .prose code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    color: var(--ink);
+  }
+
+  /* ---- reads table ---- */
+
+  .reads {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    gap: 0;
+    border-top: 1px solid var(--rule);
+  }
+
+  .read {
+    padding: 1rem 1rem 1rem 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .read-eco {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--slate);
+    margin-bottom: 0.5rem;
+  }
+
+  .read-files {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    line-height: 1.7;
+    color: var(--ink);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .read-files .lock::after {
+    content: " resolved";
+    color: var(--current);
+    font-size: 0.72rem;
+    letter-spacing: 0.04em;
+  }
+
+  /* ---- tools ---- */
+
+  .tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    max-width: var(--measure);
+  }
+
+  .tool {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    padding: 0.3rem 0.55rem;
+    border: 1px solid var(--rule);
+  }
+
+  /* ---- the reconciliation: the risk ---- */
+
+  .recon {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+    gap: clamp(2rem, 5vw, 3.5rem);
+  }
+
+  .col-label {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.13em;
+    padding-bottom: 0.75rem;
+    margin-bottom: 1.25rem;
+    border-bottom: 1px solid var(--ink);
+  }
+
+  .col-does .col-label { color: var(--current); border-bottom-color: var(--current); }
+  .col-doesnt .col-label { color: var(--behind); border-bottom-color: var(--behind); }
+
+  .lines { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1.1rem; }
+
+  .lines li { display: block; }
+
+  .line-t { display: block; font-weight: 600; }
+
+  .line-d { display: block; color: var(--slate); font-size: 0.94rem; margin-top: 0.15rem; }
+
+  /* ---- install ---- */
+
+  .files { display: flex; flex-direction: column; border-top: 1px solid var(--rule); }
+
+  .file {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 0.85rem 0;
+    border-bottom: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 0.84rem;
+    flex-wrap: wrap;
+  }
+
+  .file-os { min-width: 5.5rem; color: var(--slate); }
+  .file-name { flex: 1 1 14rem; word-break: break-all; }
+  .file-size { color: var(--slate); font-variant-numeric: tabular-nums; }
+
+  .foot {
+    padding: 2.5rem 0 4rem;
+    border-top: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--slate);
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .foot a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--rule); }
+  .foot a:hover { border-bottom-color: var(--behind-mark); }
+
+  a:focus-visible, .tool:focus-visible {
+    outline: 2px solid var(--behind-mark);
+    outline-offset: 3px;
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="bar">
+    <span class="bar-name">deptracker</span>
+    <span class="bar-ver">0.1.0</span>
+    <span class="bar-spacer"></span>
+    <a class="bar-link" href="https://github.com/quinnjr/dependency-tracker/releases/tag/v0.1.0">download</a>
+  </header>
+
+  <section class="hero">
+    <p class="eyebrow">One package, four of your repos</p>
+
+    <h1 class="hero-pkg">
+      http
+      <span class="from">pub.dev · latest 1.3.0</span>
+    </h1>
+
+    <div class="axis-scroll">
+      <div class="axis">
+        <div class="axis-line"></div>
+
+        <div class="tick" style="left: 4%;">
+          <div class="tick-ver">1.1.0</div>
+          <div class="tick-stem"></div>
+        </div>
+        <div class="tick" style="left: 36%;">
+          <div class="tick-ver">1.2.0</div>
+          <div class="tick-stem"></div>
+        </div>
+        <div class="tick" style="left: 64%;">
+          <div class="tick-ver">1.2.2</div>
+          <div class="tick-stem"></div>
+        </div>
+        <div class="tick" style="left: 96%;">
+          <div class="tick-ver">1.3.0</div>
+          <div class="tick-stem"></div>
+        </div>
+
+        <div class="pin" style="left: 4%; --delay: 120ms;">
+          <div class="pin-drop" style="height: 2.6rem;"></div>
+          <div class="pin-dot"></div>
+          <div class="pin-repo">api-gateway</div>
+          <div class="pin-note">4 behind</div>
+        </div>
+
+        <div class="pin" style="left: 36%; --delay: 220ms;">
+          <div class="pin-drop" style="height: 1.2rem;"></div>
+          <div class="pin-dot"></div>
+          <div class="pin-repo">web</div>
+          <div class="pin-note">2 behind</div>
+        </div>
+
+        <div class="pin" style="left: 36%; --delay: 320ms;">
+          <div class="pin-drop" style="height: 4.4rem;"></div>
+          <div class="pin-dot"></div>
+          <div class="pin-repo">admin</div>
+          <div class="pin-note">2 behind</div>
+        </div>
+
+        <div class="pin" style="left: 64%; --delay: 420ms;">
+          <div class="pin-drop" style="height: 2.6rem;"></div>
+          <div class="pin-dot"></div>
+          <div class="pin-repo">mobile</div>
+          <div class="pin-note">1 behind</div>
+        </div>
+
+        <div class="pin latest" style="left: 96%; --delay: 640ms;">
+          <div class="pin-drop" style="height: 1.2rem;"></div>
+          <div class="pin-dot"></div>
+          <div class="pin-repo">released</div>
+          <div class="pin-note">3 days ago</div>
+        </div>
+      </div>
+    </div>
+
+    <p class="verdict">Four repos. Three different pins. <em>None of them on 1.3.0.</em></p>
+  </section>
+
+  <section class="band">
+    <div class="band-head">
+      <h2 class="band-title">It reads what you already committed</h2>
+    </div>
+    <p class="prose">
+      No configuration file describing your dependencies twice. Point it at the folders where you
+      keep repositories and it walks them, reading the manifests and lockfiles that are already
+      there. A lockfile wins over the manifest beside it, because a resolved version can be
+      compared against a release and a range cannot.
+    </p>
+
+    <div class="reads" style="margin-top: 2.25rem;">
+      <div class="read">
+        <div class="read-eco">Dart</div>
+        <div class="read-files">
+          <span class="lock">pubspec.lock</span>
+          <span>pubspec.yaml</span>
+        </div>
+      </div>
+      <div class="read">
+        <div class="read-eco">JavaScript</div>
+        <div class="read-files">
+          <span class="lock">package-lock.json</span>
+          <span class="lock">pnpm-lock.yaml</span>
+          <span>package.json</span>
+        </div>
+      </div>
+      <div class="read">
+        <div class="read-eco">Rust</div>
+        <div class="read-files">
+          <span class="lock">Cargo.lock</span>
+          <span>Cargo.toml</span>
+        </div>
+      </div>
+      <div class="read">
+        <div class="read-eco">Python</div>
+        <div class="read-files">
+          <span>pyproject.toml</span>
+          <span>requirements.txt</span>
+        </div>
+      </div>
+      <div class="read">
+        <div class="read-eco">Go</div>
+        <div class="read-files">
+          <span class="lock">go.mod</span>
+        </div>
+      </div>
+      <div class="read">
+        <div class="read-eco">Anything else</div>
+        <div class="read-files">
+          <span>github releases</span>
+          <span>rss · atom</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="band-head">
+      <h2 class="band-title">The GitHub token is optional</h2>
+    </div>
+    <p class="prose">
+      Unauthenticated <code>api.github.com</code> allows <strong>60 requests an hour</strong>, which
+      one refresh of a few hundred packages spends immediately. But
+      <code>releases.atom</code> is a plain feed and costs no quota at all — so feeds are the default
+      path, and release notes work with no token.
+    </p>
+    <p class="prose">
+      Add a token and the notes arrive as real Markdown instead. That is the only difference. If your
+      keyring is unavailable, the app tells you and runs without the MCP server rather than falling
+      back to something unauthenticated.
+    </p>
+  </section>
+
+  <section class="band">
+    <div class="band-head">
+      <h2 class="band-title">An agent can read the same data you can</h2>
+    </div>
+    <p class="prose">
+      While the window is open, an MCP server runs on loopback over SSE. It works against the same
+      store the interface renders from, so a watch an agent adds appears in the window with no
+      polling. Ten tools:
+    </p>
+    <div class="tools" style="margin-top: 1.75rem;">
+      <span class="tool">list_watches</span>
+      <span class="tool">get_watch</span>
+      <span class="tool">get_release_notes</span>
+      <span class="tool">search_watches</span>
+      <span class="tool">add_watch</span>
+      <span class="tool">add_rss_watch</span>
+      <span class="tool">remove_watch</span>
+      <span class="tool">mark_read</span>
+      <span class="tool">snooze</span>
+      <span class="tool">refresh_now</span>
+    </div>
+    <p class="prose" style="margin-top: 1.75rem;">
+      Any page in your browser can reach <code>127.0.0.1</code>, so the server binds loopback only,
+      validates <code>Origin</code> by exact host, and compares its bearer token in constant time
+      before it will even route a request. Both that token and your GitHub token live in the host
+      keyring and nowhere else.
+    </p>
+  </section>
+
+  <section class="band">
+    <div class="recon">
+      <div class="col-does">
+        <div class="col-label">What it does</div>
+        <ul class="lines">
+          <li>
+            <span class="line-t">One row per package</span>
+            <span class="line-d">Used by five repos, it is one row with five pins — enforced by the schema, not by hopeful code.</span>
+          </li>
+          <li>
+            <span class="line-t">Release notes inline</span>
+            <span class="line-d">Enough of the changelog to decide whether you care, without opening a browser.</span>
+          </li>
+          <li>
+            <span class="line-t">Starts quiet</span>
+            <span class="line-d">A newly added package does not dump ten years of history at you as unread.</span>
+          </li>
+        </ul>
+      </div>
+      <div class="col-doesnt">
+        <div class="col-label">What it doesn't</div>
+        <ul class="lines">
+          <li>
+            <span class="line-t">Open pull requests</span>
+            <span class="line-d">Renovate and Dependabot already do that well. This is the triage surface they don't give you.</span>
+          </li>
+          <li>
+            <span class="line-t">Run in the background</span>
+            <span class="line-d">No daemon, no tray icon, no notifications. It checks when you open it or ask it to.</span>
+          </li>
+          <li>
+            <span class="line-t">Prune emptied watches yet</span>
+            <span class="line-d">Drop a dependency and its row stays behind with no repos attached. Known, unfinished.</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="band">
+    <div class="band-head">
+      <h2 class="band-title">Install 0.1.0</h2>
+    </div>
+    <div class="files">
+      <div class="file">
+        <span class="file-os">Linux</span>
+        <span class="file-name">deptracker-0.1.0-linux-x64.tar.gz</span>
+        <span class="file-size">11.5 MB</span>
+      </div>
+      <div class="file">
+        <span class="file-os">Flatpak</span>
+        <span class="file-name">dev.quinnjr.deptracker-0.1.0.flatpak</span>
+        <span class="file-size">8.6 MB</span>
+      </div>
+      <div class="file">
+        <span class="file-os">macOS</span>
+        <span class="file-name">deptracker-0.1.0-macos.zip</span>
+        <span class="file-size">19.6 MB</span>
+      </div>
+      <div class="file">
+        <span class="file-os">Windows</span>
+        <span class="file-name">deptracker-0.1.0-windows-x64.zip</span>
+        <span class="file-size">13.9 MB</span>
+      </div>
+    </div>
+    <p class="prose" style="margin-top: 1.5rem;">
+      On Linux a secret service such as <code>gnome-keyring</code> needs to be running. The macOS and
+      Windows builds are unsigned, so Gatekeeper and SmartScreen warn on first launch.
+    </p>
+  </section>
+
+  <footer class="foot">
+    <span>453 tests</span>
+    <span>Flutter · Linux, macOS, Windows</span>
+    <a href="https://github.com/quinnjr/dependency-tracker">source</a>
+  </footer>
+
+</div>
+</body>
+</html>
