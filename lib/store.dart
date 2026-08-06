@@ -21,6 +21,46 @@ class WatchCounts {
   final Map<int, int> usages;
 }
 
+/// Where one watch's own projects sit relative to the registry, as
+/// [Store.driftFor] projects it.
+///
+/// This is the number the whole app exists to show: not "a new version exists"
+/// but "your projects are this far from it".
+class Drift {
+  const Drift({
+    required this.pinnedProjects,
+    required this.lowestPin,
+    required this.highestPin,
+    required this.newestRelease,
+    required this.behindBy,
+  });
+
+  /// Usages with a resolved pin. Zero when every usage is an unresolved range,
+  /// in which case [lowestPin] and [highestPin] are both null and [behindBy]
+  /// is zero — nothing is known to be behind, because nothing is known.
+  final int pinnedProjects;
+
+  /// Oldest and newest version this package is pinned at across all projects.
+  /// Equal when every project agrees; both null when no pin is resolved.
+  final String? lowestPin;
+  final String? highestPin;
+
+  /// Newest version the registry has published. Never null: a [Drift] only
+  /// exists for a watch with at least one fetched release.
+  final String newestRelease;
+
+  /// Releases strictly newer than [lowestPin].
+  final int behindBy;
+
+  /// True when every project is on the newest published release.
+  bool get isCurrent => pinnedProjects > 0 && behindBy == 0;
+
+  /// True when projects disagree about which version to use — worth surfacing
+  /// separately from being behind, because it is a different job to fix.
+  bool get isSplit =>
+      lowestPin != null && highestPin != null && lowestPin != highestPin;
+}
+
 /// The only mutable state in the app. Both the UI and the MCP server hold a
 /// reference to one instance, which is why an agent calling `add_watch` shows up
 /// in the open window with no extra plumbing.
@@ -562,6 +602,78 @@ class Store extends ChangeNotifier implements EtagCache {
     }
 
     return WatchCounts(unread: unread, usages: usages);
+  }
+
+  /// Batched projection of where a watch's own projects sit relative to what
+  /// the registry has published, keyed by watch id.
+  ///
+  /// A watch appears here only if it has at least one fetched release: with
+  /// nothing fetched there is no published version to be behind of, and an
+  /// entry claiming zero drift would be indistinguishable from one that has
+  /// genuinely caught up. Callers must treat an absent id as "not known yet"
+  /// rather than as "up to date".
+  ///
+  /// Costs two queries per chunk regardless of how many watches are asked
+  /// about, for the same reason [countsFor] does — the watch list calls both
+  /// once per build, not once per row.
+  Map<int, Drift> driftFor(Iterable<int> watchIds) {
+    final ids = watchIds.toSet().toList();
+    if (ids.isEmpty) return const {};
+
+    final pins = <int, List<String>>{};
+    final versions = <int, List<String>>{};
+    for (final chunk in _chunks(ids)) {
+      final placeholders = List.filled(chunk.length, '?').join(', ');
+
+      // Only resolved pins: a range like `^1.2.0` names no single version, so
+      // placing it on an axis or measuring drift from it would be an invention.
+      for (final r in _db.select(
+        'SELECT watch_id, pinned_version FROM usage '
+        'WHERE is_resolved = 1 AND watch_id IN ($placeholders)',
+        chunk,
+      )) {
+        pins
+            .putIfAbsent(r['watch_id'] as int, () => [])
+            .add(r['pinned_version'] as String);
+      }
+
+      for (final r in _db.select(
+        'SELECT watch_id, version FROM release WHERE watch_id IN ($placeholders)',
+        chunk,
+      )) {
+        versions
+            .putIfAbsent(r['watch_id'] as int, () => [])
+            .add(r['version'] as String);
+      }
+    }
+
+    final drift = <int, Drift>{};
+    versions.forEach((watchId, released) {
+      final newest = newestVersion(released);
+      if (newest == null) return;
+
+      final ownPins = pins[watchId] ?? const <String>[];
+      String? low;
+      String? high;
+      for (final p in ownPins) {
+        if (low == null || compareVersions(p, low) < 0) low = p;
+        if (high == null || compareVersions(p, high) > 0) high = p;
+      }
+
+      drift[watchId] = Drift(
+        pinnedProjects: ownPins.length,
+        lowestPin: low,
+        highestPin: high,
+        newestRelease: newest,
+        // Measured from the *stalest* pin, because that is the repo that
+        // actually needs work. Measuring from the newest pin would report zero
+        // drift for a package one repo has already upgraded and five have not.
+        behindBy: low == null
+            ? 0
+            : released.where((v) => compareVersions(v, low!) > 0).length,
+      );
+    });
+    return drift;
   }
 
   /// A rescan is authoritative for the manifest it scanned: dependencies that

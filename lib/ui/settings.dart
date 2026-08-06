@@ -6,6 +6,7 @@ import '../redact.dart';
 import '../scanner.dart';
 import '../secrets.dart';
 import '../store.dart';
+import 'theme.dart';
 
 /// The settings pane: scan roots, the optional GitHub PAT, and the MCP
 /// server's status.
@@ -134,143 +135,222 @@ class _SettingsPaneState extends State<SettingsPane> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final t = tokensOf(context);
     final roots = widget.store.scanRoots();
+    final body = TextStyle(fontSize: 13, color: t.slate, height: 1.5);
 
     return ListView(
-      padding: const EdgeInsets.all(20),
+      padding: EdgeInsets.zero,
       children: [
-        Text('Scanned folders', style: theme.textTheme.titleMedium),
-        const Text(
-          'Each folder is walked three levels deep, skipping node_modules, '
-          'target, build, and similar.',
-        ),
-        const SizedBox(height: 8),
-        if (roots.isEmpty)
-          const Text('No folders yet.')
-        else
-          ...roots.map(
-            (path) => ListTile(
-              dense: true,
-              title: Text(path),
-              trailing: IconButton(
-                icon: const Icon(Icons.delete_outline),
-                tooltip: 'Remove',
-                onPressed: () {
-                  widget.store.removeScanRoot(path);
-                  setState(() {});
-                },
-              ),
-            ),
-          ),
-        const SizedBox(height: 8),
-        Row(
+        _SettingsSection(
+          label: 'Scanned folders',
+          first: true,
           children: [
-            OutlinedButton(
-              onPressed: _addRoot,
-              child: const Text('Add folder'),
+            Text(
+              'Each folder is walked three levels deep, skipping node_modules, '
+              'target, build, and similar.',
+              style: body,
             ),
-            const SizedBox(width: 8),
-            FilledButton(
-              onPressed: _scanning ? null : _scan,
-              child: const Text('Scan now'),
-            ),
-          ],
-        ),
-        if (_scanSummary != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text(_scanSummary!, style: theme.textTheme.bodySmall),
-          ),
-
-        const Divider(height: 32),
-        Text('GitHub token', style: theme.textTheme.titleMedium),
-        const Text(
-          'Optional. Without one, release notes still come from public Atom '
-          'feeds. A token gets richer Markdown notes and faster lookups. '
-          'Stored in the host keyring, never on disk.',
-        ),
-        const SizedBox(height: 8),
-        if (_hasStoredPat)
-          Text(
-            'A token is set. Save a new one to replace it.',
-            style: theme.textTheme.bodySmall,
-          ),
-        TextField(
-          key: const Key('pat-field'),
-          controller: _patController,
-          // Never pre-populated with the stored value: a stored secret should
-          // not be readable by anyone who opens this dialog.
-          obscureText: true,
-          decoration: const InputDecoration(
-            labelText: 'Personal access token',
-            hintText: 'Paste your token here',
-          ),
-        ),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: TextButton(
-            onPressed: _savePat,
-            child: const Text('Save token'),
-          ),
-        ),
-        if (_patStatus != null)
-          Text(
-            _patStatus!,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: _patStatusIsError ? theme.colorScheme.error : null,
-            ),
-          ),
-
-        const Divider(height: 32),
-        Text('MCP server', style: theme.textTheme.titleMedium),
-        if (widget.mcpError != null)
-          Text(
-            'The MCP server is not running: '
-            '${redact(widget.mcpError.toString())}',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.error,
-            ),
-          )
-        else if (widget.mcpPort != null) ...[
-          Text(
-            'Listening on http://127.0.0.1:${widget.mcpPort}$mcpPath '
-            '(loopback only).',
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'Paste the bearer token into your MCP client config. It lives in '
-            'the host keyring, so this is the only place to read it.',
-            style: theme.textTheme.bodySmall,
-          ),
-          if (_revealedToken == null)
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton(
-                onPressed: _revealToken,
-                child: const Text('Reveal token'),
-              ),
-            )
-          else
+            const SizedBox(height: 9),
+            if (roots.isEmpty)
+              Text('No folders yet.', style: body)
+            else
+              for (final path in roots)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 2),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          path,
+                          overflow: TextOverflow.ellipsis,
+                          style: monoStyle(color: t.ink, size: 12.5),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline, size: 17),
+                        tooltip: 'Remove',
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () {
+                          widget.store.removeScanRoot(path);
+                          setState(() {});
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+            const SizedBox(height: 9),
             Row(
               children: [
-                Expanded(child: SelectableText(_revealedToken!)),
-                IconButton(
-                  icon: const Icon(Icons.copy),
-                  tooltip: 'Copy',
-                  onPressed: () =>
-                      Clipboard.setData(ClipboardData(text: _revealedToken!)),
+                OutlinedButton(
+                  onPressed: _addRoot,
+                  child: const Text('Add folder'),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.refresh),
-                  tooltip: 'Rotate token — invalidates the current one',
-                  onPressed: _rotateToken,
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: _scanning ? null : _scan,
+                  child: const Text('Scan now'),
                 ),
               ],
             ),
-        ] else
-          const Text('Starting…'),
+            if (_scanSummary != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text(
+                  _scanSummary!,
+                  style: monoStyle(color: t.slate, size: 12),
+                ),
+              ),
+          ],
+        ),
+
+        _SettingsSection(
+          label: 'GitHub token',
+          children: [
+            Text(
+              'Optional. Without one, release notes still come from public '
+              'Atom feeds. A token gets richer Markdown notes and faster '
+              'lookups. Stored in the host keyring, never on disk.',
+              style: body,
+            ),
+            const SizedBox(height: 9),
+            if (_hasStoredPat)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  'A token is set. Save a new one to replace it.',
+                  style: TextStyle(fontSize: 12.5, color: t.current),
+                ),
+              ),
+            TextField(
+              key: const Key('pat-field'),
+              controller: _patController,
+              // Never pre-populated with the stored value: a stored secret
+              // should not be readable by anyone who opens this dialog.
+              obscureText: true,
+              style: monoStyle(color: t.ink, size: 13),
+              decoration: const InputDecoration(
+                labelText: 'Personal access token',
+                hintText: 'Paste your token here',
+              ),
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed: _savePat,
+                child: const Text('Save token'),
+              ),
+            ),
+            if (_patStatus != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  _patStatus!,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.4,
+                    color: _patStatusIsError ? t.behind : t.current,
+                  ),
+                ),
+              ),
+          ],
+        ),
+
+        _SettingsSection(
+          label: 'MCP server',
+          children: [
+            if (widget.mcpError != null)
+              Text(
+                'The MCP server is not running: '
+                '${redact(widget.mcpError.toString())}',
+                style: TextStyle(fontSize: 12.5, color: t.behind, height: 1.4),
+              )
+            else if (widget.mcpPort != null) ...[
+              Text(
+                'http://127.0.0.1:${widget.mcpPort}$mcpPath',
+                style: monoStyle(color: t.ink, size: 12.5),
+              ),
+              const SizedBox(height: 4),
+              Text('Loopback only.', style: body),
+              const SizedBox(height: 9),
+              Text(
+                'Paste the bearer token into your MCP client config. It lives '
+                'in the host keyring, so this is the only place to read it.',
+                style: body,
+              ),
+              const SizedBox(height: 8),
+              if (_revealedToken == null)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: _revealToken,
+                    child: const Text('Reveal token'),
+                  ),
+                )
+              else
+                Row(
+                  children: [
+                    Expanded(
+                      child: SelectableText(
+                        _revealedToken!,
+                        style: monoStyle(color: t.ink, size: 12.5),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.copy, size: 17),
+                      tooltip: 'Copy',
+                      onPressed: () => Clipboard.setData(
+                        ClipboardData(text: _revealedToken!),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.refresh, size: 17),
+                      tooltip: 'Rotate token — invalidates the current one',
+                      onPressed: _rotateToken,
+                    ),
+                  ],
+                ),
+            ] else
+              Text('Starting…', style: body),
+          ],
+        ),
       ],
+    );
+  }
+}
+
+/// Same eyebrow-over-hairline structure the detail pane uses, so the dialog
+/// reads as part of the same window rather than as a stock settings sheet.
+class _SettingsSection extends StatelessWidget {
+  const _SettingsSection({
+    required this.label,
+    required this.children,
+    this.first = false,
+  });
+
+  final String label;
+  final List<Widget> children;
+  final bool first;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = tokensOf(context);
+    return Container(
+      decoration: first
+          ? null
+          : BoxDecoration(
+              border: Border(top: BorderSide(color: t.rule)),
+            ),
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label.toUpperCase(), style: eyebrowStyle(color: t.slate)),
+          const SizedBox(height: 9),
+          ...children,
+        ],
+      ),
     );
   }
 }
