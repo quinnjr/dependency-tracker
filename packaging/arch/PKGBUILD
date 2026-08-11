@@ -1,0 +1,97 @@
+# Maintainer: Joseph R. Quinn <quinn.josephr@gmail.com>
+
+# Builds Dependency Tracker from a pinned upstream commit.
+#
+# The Flutter SDK is deliberately NOT in makedepends. Arch's `flutter` package
+# would be pulled in and used even when a perfectly good SDK is already on
+# PATH (a snap install, an fvm-managed toolchain, a tarball in ~), and having
+# two SDKs disagree about the pinned engine is worse than requiring one. So:
+# put `flutter` on PATH before running makepkg. `prepare()` checks and says so.
+#
+# Bump _commit (and pkgrel back to 1) to package a newer revision.
+
+pkgname=deptracker
+pkgver=0.1.1.r2.g1ef6a60
+pkgrel=1
+_commit=1ef6a60459f15f5904c80235ea6c433426a448ec
+pkgdesc='Watch project dependencies for new releases across pub.dev, npm, crates.io, PyPI, Go and GitHub'
+arch=('x86_64')
+url='https://github.com/quinnjr/dependency-tracker'
+license=('MIT')
+# gtk3 is the Flutter Linux shell's toolkit; libsecret backs
+# flutter_secure_storage (the GitHub PAT and the MCP bearer token live in the
+# login keyring) and jsoncpp is what its Linux plugin serialises with.
+# libsqlite3 is NOT listed: sqlite3_flutter_libs ships its own inside the
+# bundle, so the app does not use the system one.
+depends=('gtk3' 'libsecret' 'jsoncpp' 'zlib')
+makedepends=('git' 'clang' 'cmake' 'ninja' 'pkgconf' 'patchelf')
+optdepends=('xdg-desktop-portal: native directory picker for adding scan roots')
+options=('!strip' '!debug')
+source=("git+$url.git#commit=$_commit")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/dependency-tracker"
+  git describe --tags --long | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+prepare() {
+  if ! command -v flutter >/dev/null; then
+    echo 'error: flutter is not on PATH.' >&2
+    echo '       Install the Flutter SDK (pacman -S flutter, a snap, or fvm)' >&2
+    echo '       and re-run makepkg. See the comment at the top of this file.' >&2
+    return 1
+  fi
+
+  cd "$srcdir/dependency-tracker"
+  flutter config --enable-linux-desktop --no-analytics >/dev/null
+  flutter pub get
+}
+
+build() {
+  cd "$srcdir/dependency-tracker"
+  flutter build linux --release
+}
+
+check() {
+  cd "$srcdir/dependency-tracker"
+  flutter test
+}
+
+package() {
+  cd "$srcdir/dependency-tracker"
+
+  # The Flutter runner resolves data/ and lib/ relative to the real path of its
+  # own executable, so the bundle has to be installed intact as a unit and
+  # /usr/bin/deptracker is a symlink into it. Splitting it across the FHS
+  # (binary in /usr/bin, assets in /usr/share) makes the app fail to find its
+  # own ICU data at startup.
+  install -dm755 "$pkgdir/opt/$pkgname"
+  cp -a build/linux/x64/release/bundle/. "$pkgdir/opt/$pkgname/"
+  chmod 755 "$pkgdir/opt/$pkgname/$pkgname"
+
+  # The Flutter plugin libraries are linked against libflutter_linux_gtk.so
+  # with a RUNPATH pointing at linux/flutter/ephemeral inside the build tree —
+  # a directory that does not exist on the installed system, and which would
+  # additionally bake the builder's home directory into a shipped binary. They
+  # sit next to libflutter_linux_gtk.so once installed, so $ORIGIN is both
+  # correct and relocatable. libflutter_linux_gtk.so itself already uses it.
+  local so
+  for so in "$pkgdir/opt/$pkgname"/lib/*.so; do
+    if patchelf --print-rpath "$so" | grep -q "$srcdir"; then
+      patchelf --set-rpath '$ORIGIN' "$so"
+    fi
+  done
+
+  install -dm755 "$pkgdir/usr/bin"
+  ln -s "/opt/$pkgname/$pkgname" "$pkgdir/usr/bin/$pkgname"
+
+  install -Dm644 packaging/linux/dev.quinnjr.deptracker.desktop \
+    "$pkgdir/usr/share/applications/dev.quinnjr.deptracker.desktop"
+  install -Dm644 packaging/linux/dev.quinnjr.deptracker.metainfo.xml \
+    "$pkgdir/usr/share/metainfo/dev.quinnjr.deptracker.metainfo.xml"
+  install -Dm644 packaging/linux/dev.quinnjr.deptracker.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/dev.quinnjr.deptracker.svg"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

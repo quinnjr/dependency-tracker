@@ -10,3 +10,9 @@ docs/superpowers/
 .flatpak-build/
 .flatpak-repo/
 .flatpak-builder/
+
+# makepkg working directories and output, produced in packaging/arch/
+packaging/arch/src/
+packaging/arch/pkg/
+packaging/arch/dependency-tracker/
+*.pkg.tar.zst
