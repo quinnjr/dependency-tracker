@@ -14,6 +14,7 @@ import 'secrets.dart';
 import 'store.dart';
 import 'ui/app.dart';
 import 'ui/settings.dart';
+import 'ui/theme.dart';
 
 // Everything below assembles real resources: the database at the user's data
 // path, the OS keyring, and a listening socket. A test that ran it would touch
@@ -137,11 +138,8 @@ class _TrackerAppState extends State<TrackerApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Dependency Tracker',
-      theme: ThemeData(colorSchemeSeed: Colors.indigo),
-      darkTheme: ThemeData(
-        colorSchemeSeed: Colors.indigo,
-        brightness: Brightness.dark,
-      ),
+      theme: buildTheme(Brightness.light),
+      darkTheme: buildTheme(Brightness.dark),
       home: AppShell(
         store: widget.store,
         onRefresh: widget.refresh,

@@ -60,6 +60,18 @@ Widget pane({int? mcpPort = 51234, Object? mcpError}) => MaterialApp(
   ),
 );
 
+/// Scrolls [f] into view, then taps it.
+///
+/// The pane is a `ListView` taller than an 800x600 test surface, so the MCP
+/// controls start below the fold. `ensureVisible` only schedules the scroll —
+/// without a pump between it and the tap, `tap` computes its target from the
+/// pre-scroll layout and lands on nothing, silently doing nothing at all.
+Future<void> _tap(WidgetTester tester, Finder f) async {
+  await tester.ensureVisible(f);
+  await tester.pumpAndSettle();
+  await tester.tap(f);
+}
+
 void main() {
   settingsEdgeTests();
   setUp(() {
@@ -161,7 +173,7 @@ void main() {
     await tester.pumpWidget(pane());
     await tester.pumpAndSettle();
     expect(find.textContaining(token), findsNothing);
-    await tester.tap(find.widgetWithText(TextButton, 'Reveal token'));
+    await _tap(tester, find.widgetWithText(TextButton, 'Reveal token'));
     await tester.pumpAndSettle();
     expect(find.textContaining(token), findsOneWidget);
   });
@@ -171,12 +183,13 @@ void main() {
   ) async {
     await tester.pumpWidget(pane());
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(TextButton, 'Reveal token'));
+    await _tap(tester, find.widgetWithText(TextButton, 'Reveal token'));
     await tester.pumpAndSettle();
     final before = await secrets.mcpToken();
     expect(find.textContaining(before), findsOneWidget);
 
-    await tester.tap(
+    await _tap(
+      tester,
       find.byTooltip('Rotate token — invalidates the current one'),
     );
     await tester.pumpAndSettle();
@@ -250,7 +263,7 @@ void settingsEdgeTests() {
     await tester.pumpAndSettle();
 
     // The pane still renders, and the single explanation is the banner's.
-    expect(find.textContaining('GitHub'), findsWidgets);
+    expect(find.textContaining('GITHUB'), findsWidgets);
     expect(tester.takeException(), isNull);
   });
 
@@ -277,10 +290,10 @@ void settingsEdgeTests() {
     await tester.pumpWidget(pane());
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Reveal token'));
+    await _tap(tester, find.text('Reveal token'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.widgetWithIcon(IconButton, Icons.copy));
+    await _tap(tester, find.widgetWithIcon(IconButton, Icons.copy));
     await tester.pumpAndSettle();
 
     expect(copied, hasLength(1));

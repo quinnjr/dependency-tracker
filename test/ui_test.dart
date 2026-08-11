@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:deptracker/models.dart';
@@ -77,13 +79,13 @@ void main() {
     expect(find.byKey(const Key('unread-badge')), findsNothing);
   });
 
-  testWidgets('filter chips narrow the list', (tester) async {
+  testWidgets('the masthead counts double as filters', (tester) async {
     seed(name: 'quiet', releases: ['1.2.0'], read: true);
     seed(name: 'noisy', releases: ['9.9.9']);
     await tester.pumpWidget(MaterialApp(home: app()));
     expect(find.text('quiet'), findsOneWidget);
 
-    await tester.tap(find.widgetWithText(FilterChip, 'Unread'));
+    await tester.tap(find.text('UNREAD'));
     await tester.pumpAndSettle();
     expect(find.text('noisy'), findsOneWidget);
     expect(find.text('quiet'), findsNothing);
@@ -128,7 +130,7 @@ void main() {
   ) async {
     seed(name: 'http');
     await tester.pumpWidget(MaterialApp(home: app()));
-    expect(find.textContaining('used in 1 project'), findsOneWidget);
+    expect(find.textContaining('1 project'), findsOneWidget);
     expect(
       find.textContaining('not used by any scanned project'),
       findsNothing,
@@ -160,7 +162,8 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: app()));
     await tester.tap(find.text('http'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('^1.2.0 (range)'), findsOneWidget);
+    expect(find.text('^1.2.0'), findsOneWidget);
+    expect(find.text('RANGE'), findsOneWidget);
   });
 
   testWidgets('a watch with an error shows a warning icon', (tester) async {
@@ -177,7 +180,7 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: app()));
     await tester.tap(find.text('http'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(TextButton, 'Mark read'));
+    await tester.tap(find.widgetWithText(TextButton, 'Mark all read'));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('unread-badge')), findsNothing);
   });
@@ -216,7 +219,7 @@ void main() {
       find.descendant(
         of: find.ancestor(
           of: find.text('zero-unread'),
-          matching: find.byType(ListTile),
+          matching: find.byType(InkWell),
         ),
         matching: find.byKey(const Key('unread-badge')),
       ),
@@ -227,7 +230,7 @@ void main() {
       find.descendant(
         of: find.ancestor(
           of: find.text('two-unread'),
-          matching: find.byType(ListTile),
+          matching: find.byType(InkWell),
         ),
         matching: find.text('2'),
       ),
@@ -237,7 +240,7 @@ void main() {
       find.descendant(
         of: find.ancestor(
           of: find.text('one-unread'),
-          matching: find.byType(ListTile),
+          matching: find.byType(InkWell),
         ),
         matching: find.text('1'),
       ),
@@ -247,7 +250,7 @@ void main() {
       find.descendant(
         of: find.ancestor(
           of: find.text('no-releases-no-usages'),
-          matching: find.byType(ListTile),
+          matching: find.byType(InkWell),
         ),
         matching: find.textContaining('not used by any scanned project'),
       ),
@@ -260,6 +263,270 @@ void main() {
   ) async {
     await tester.pumpWidget(MaterialApp(home: app()));
     expect(find.textContaining('No watches'), findsOneWidget);
+  });
+
+  testWidgets('a row states how far behind the stalest project is', (
+    tester,
+  ) async {
+    // The number the whole app exists to show, on the row rather than only
+    // behind a click.
+    seed(name: 'http', pinned: '1.0.0', releases: ['1.0.0', '1.5.0', '2.0.0']);
+    await tester.pumpWidget(MaterialApp(home: app()));
+    expect(find.text('2 BEHIND'), findsOneWidget);
+    expect(find.text('CURRENT'), findsNothing);
+    // 'BEHIND' on its own is the masthead tab, which is always present.
+  });
+
+  testWidgets('a row on the newest release is marked current, not blank', (
+    tester,
+  ) async {
+    // Silence would be ambiguous between "up to date" and "never checked".
+    seed(name: 'http', pinned: '2.0.0', releases: ['1.0.0', '2.0.0']);
+    await tester.pumpWidget(MaterialApp(home: app()));
+    expect(find.text('CURRENT'), findsOneWidget);
+    expect(find.text('1 BEHIND'), findsNothing);
+  });
+
+  testWidgets('a row with nothing fetched claims neither state', (
+    tester,
+  ) async {
+    seed(name: 'http', pinned: '1.0.0');
+    await tester.pumpWidget(MaterialApp(home: app()));
+    expect(find.text('CURRENT'), findsNothing);
+    expect(find.text('1 BEHIND'), findsNothing);
+  });
+
+  testWidgets('a row shows the version spread when projects disagree', (
+    tester,
+  ) async {
+    final id = store.upsertWatch(WatchKind.pub, 'http');
+    for (final (path, pin) in [('/repos/a', '1.0.0'), ('/repos/b', '2.0.0')]) {
+      store.replaceUsagesForProject(path, 'pubspec.lock', [
+        Usage(
+          watchId: id,
+          projectPath: path,
+          manifestFile: 'pubspec.lock',
+          pinnedVersion: pin,
+          isResolved: true,
+          isDevDep: false,
+        ),
+      ]);
+    }
+    store.insertReleases(id, [Release(watchId: id, version: '2.0.0')]);
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    expect(find.text('2 projects · 1.0.0 → 2.0.0'), findsOneWidget);
+  });
+
+  testWidgets('a row whose only pin is a range says so rather than guessing', (
+    tester,
+  ) async {
+    final id = store.upsertWatch(WatchKind.pub, 'http');
+    store.replaceUsagesForProject('/repos/a', 'pubspec.yaml', [
+      Usage(
+        watchId: id,
+        projectPath: '/repos/a',
+        manifestFile: 'pubspec.yaml',
+        pinnedVersion: '^1.0.0',
+        isResolved: false,
+        isDevDep: false,
+      ),
+    ]);
+    store.insertReleases(id, [Release(watchId: id, version: '2.0.0')]);
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    expect(find.text('1 project · no resolved pin'), findsOneWidget);
+  });
+
+  testWidgets('the masthead counts every filter, not just the active one', (
+    tester,
+  ) async {
+    seed(name: 'quiet', pinned: '1.0.0', releases: ['1.0.0'], read: true);
+    seed(name: 'stale', pinned: '1.0.0', releases: ['9.9.9']);
+    store.upsertWatch(WatchKind.pub, 'bare');
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+
+    // Watched 3, Unread 1, Behind 1 — read off three separate tabs, so a
+    // regression that made them all report the visible list would show up.
+    for (final label in ['WATCHED', 'UNREAD', 'BEHIND']) {
+      expect(find.text(label), findsOneWidget);
+    }
+    expect(find.text('3'), findsOneWidget, reason: 'the Watched count');
+    expect(
+      find.text('1'),
+      findsNWidgets(3),
+      reason: 'the Unread and Behind counts, plus one row badge',
+    );
+  });
+
+  testWidgets('tapping the Behind count narrows the list to what is behind', (
+    tester,
+  ) async {
+    seed(name: 'quiet', pinned: '1.0.0', releases: ['1.0.0'], read: true);
+    seed(name: 'stale', pinned: '1.0.0', releases: ['1.0.0', '9.9.9']);
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    expect(find.text('quiet'), findsOneWidget);
+
+    await tester.tap(find.text('BEHIND'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('stale'), findsOneWidget);
+    expect(find.text('quiet'), findsNothing);
+  });
+
+  testWidgets('each empty filter explains its own emptiness', (tester) async {
+    // "No watches yet" would be a lie under the Behind filter when there are
+    // watches and none of them are behind.
+    seed(name: 'http', pinned: '1.0.0', releases: ['1.0.0'], read: true);
+    await tester.pumpWidget(MaterialApp(home: app()));
+
+    await tester.tap(find.text('BEHIND'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Nothing behind'), findsOneWidget);
+
+    await tester.tap(find.text('UNREAD'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Nothing new'), findsOneWidget);
+  });
+
+  testWidgets('the detail pane opens on the drift axis', (tester) async {
+    seed(name: 'http', pinned: '1.0.0', releases: ['1.0.0', '2.0.0']);
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('http'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('DRIFT'), findsOneWidget);
+    expect(
+      find.text('1 project pinned · stalest 1.0.0, 1 release behind'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the drift section is dropped when nothing has been fetched', (
+    tester,
+  ) async {
+    // An axis with no ticks is a heading over nothing; the Releases section
+    // below already says nothing has been fetched.
+    seed(name: 'http', pinned: '1.0.0');
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('http'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('DRIFT'), findsNothing);
+    expect(find.text('Nothing fetched yet.'), findsOneWidget);
+  });
+
+  testWidgets('the refresh control shows progress and refuses a second press', (
+    tester,
+  ) async {
+    // Without this the button stays live during a refresh and a double-click
+    // fires two concurrent full passes over every watch.
+    seed();
+    final gate = Completer<RefreshReport>();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: AppShell(
+          store: store,
+          settingsPane: const Text('settings pane'),
+          onRefresh: (id) {
+            refreshCount++;
+            return gate.future;
+          },
+        ),
+      ),
+    );
+
+    await tester.tap(find.byIcon(Icons.refresh));
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.byIcon(Icons.refresh), findsNothing);
+
+    await tester.tap(find.byType(CircularProgressIndicator));
+    await tester.pump();
+    expect(refreshCount, 1, reason: 'the disabled control must not re-fire');
+
+    gate.complete(const RefreshReport(refreshed: 4, failed: 1, newReleases: 2));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.refresh), findsOneWidget);
+    expect(find.text('4 refreshed · 2 new · 1 failed'), findsOneWidget);
+  });
+
+  testWidgets('a clean refresh reports only what happened', (tester) async {
+    // "0 failed, 0 new" invites the reader to look for a problem there is not.
+    seed();
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.byIcon(Icons.refresh));
+    await tester.pumpAndSettle();
+    expect(find.text('1 refreshed'), findsOneWidget);
+  });
+
+  testWidgets('the detail pane copes with the selected watch disappearing', (
+    tester,
+  ) async {
+    // Exactly what an MCP remove_watch call does while the row is open.
+    final id = seed(name: 'http');
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('http'));
+    await tester.pumpAndSettle();
+
+    store.removeWatch(id);
+    await tester.pumpAndSettle();
+
+    expect(find.text('That watch no longer exists.'), findsOneWidget);
+  });
+
+  testWidgets('the detail header shows the source repository when known', (
+    tester,
+  ) async {
+    final id = seed(name: 'http');
+    store.setWatchMeta(id, repoUrl: 'https://github.com/dart-lang/http');
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('http'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('PUB'),
+      findsNWidgets(2),
+      reason: "the row's ecosystem column and the detail header",
+    );
+    expect(find.text('https://github.com/dart-lang/http'), findsOneWidget);
+  });
+
+  testWidgets('a snoozed watch says until when in the detail header', (
+    tester,
+  ) async {
+    final id = seed(name: 'http');
+    store.snooze(id, DateTime.utc(2030, 1, 2));
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('http'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('SNOOZED UNTIL 2030-01-02'), findsOneWidget);
+  });
+
+  testWidgets('a dev-only dependency is marked as one', (tester) async {
+    // It changes what an upgrade costs: a dev dependency does not ship.
+    final id = store.upsertWatch(WatchKind.pub, 'lints');
+    store.replaceUsagesForProject('/repos/a', 'pubspec.yaml', [
+      Usage(
+        watchId: id,
+        projectPath: '/repos/a',
+        manifestFile: 'pubspec.yaml',
+        pinnedVersion: '1.0.0',
+        isResolved: true,
+        isDevDep: true,
+      ),
+    ]);
+
+    await tester.pumpWidget(MaterialApp(home: app()));
+    await tester.tap(find.text('lints'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('DEV'), findsOneWidget);
   });
 
   testWidgets('the settings pane is reachable', (tester) async {
