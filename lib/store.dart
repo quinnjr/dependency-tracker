@@ -66,12 +66,15 @@ class Drift {
 /// in the open window with no extra plumbing.
 ///
 /// Mutators of UI-visible state (`watch`, `usage`, `release`, `scan_root`)
-/// call `notifyListeners()` at most once per call: exactly once when state
-/// actually changed, and zero times on an explicit batch opt-out
-/// (`upsertWatch(notify: false)`) or a call with nothing to do
-/// (`markUnattemptedStale` with an empty id list). `meta` and `http_cache`
-/// are internal bookkeeping the UI never renders and are exempt from the rule
-/// entirely — see the "meta and http cache" section below for the specifics.
+/// notify at most once per call: exactly once when state actually changed,
+/// and zero times on an explicit batch opt-out (`upsertWatch(notify: false)`)
+/// or a call with nothing to do (`markUnattemptedStale` with an empty id
+/// list). Every such mutator routes through [_deferOrNotify], so inside a
+/// [runInTransaction] batch the notification is deferred to a single one
+/// fired after `COMMIT` — and never fired for a batch that rolls back.
+/// `meta` and `http_cache` are internal bookkeeping the UI never renders and
+/// are exempt from the rule entirely — see the "meta and http cache" section
+/// below for the specifics.
 class Store extends ChangeNotifier implements EtagCache {
   Store._(this._db);
 
@@ -79,6 +82,14 @@ class Store extends ChangeNotifier implements EtagCache {
   bool _closed = false;
   bool _inTransaction = false;
   bool _pendingNotify = false;
+
+  // Prepared once per Store and reused, because the scanner calls
+  // [upsertWatch] once per parsed dependency inside its per-manifest
+  // transaction — re-preparing two fixed SQL strings per dependency is the
+  // per-row overhead [insertReleases] and [replaceUsagesForProject] already
+  // avoid with their prepare-once/execute-many statements.
+  PreparedStatement? _upsertWatchInsert;
+  PreparedStatement? _upsertWatchSelect;
 
   static Store open(String file) {
     final db = sqlite3.open(file);
@@ -102,6 +113,8 @@ class Store extends ChangeNotifier implements EtagCache {
   void close() {
     if (_closed) return;
     _closed = true;
+    _upsertWatchInsert?.dispose();
+    _upsertWatchSelect?.dispose();
     _db.dispose();
   }
 
@@ -192,32 +205,60 @@ class Store extends ChangeNotifier implements EtagCache {
   /// outermost call commits or rolls back; an inner call's exception still
   /// propagates out to it.
   ///
-  /// A nested mutator that would otherwise notify immediately (like
-  /// [replaceUsagesForProject]) instead defers via [_deferOrNotify], so a
-  /// caller batching several such mutators in one [runInTransaction] still
-  /// gets exactly one notification, fired only once the outermost call's
-  /// `COMMIT` actually succeeds — never for a batch that rolls back, per the
-  /// same "no state changed, no notification" rule [markUnattemptedStale]
-  /// documents.
+  /// A nested mutator that would otherwise notify immediately (every
+  /// UI-visible-state mutator in this file routes through [_deferOrNotify])
+  /// instead defers, so a caller batching several such mutators in one
+  /// [runInTransaction] still gets exactly one notification, fired only once
+  /// the outermost call's `COMMIT` actually succeeds — never for a batch
+  /// that rolls back, per the same "no state changed, no notification" rule
+  /// [markUnattemptedStale] documents.
+  ///
+  /// [action] must be synchronous. An async closure would return its Future
+  /// before doing any work, letting `COMMIT` race ahead of every write after
+  /// the first `await` — so a Future return value is rejected outright
+  /// rather than silently committing a half-empty transaction.
   T runInTransaction<T>(T Function() action) {
     if (_inTransaction) return action();
     _db.execute('BEGIN');
     _inTransaction = true;
+    final T result;
     try {
-      final result = action();
-      _db.execute('COMMIT');
-      if (_pendingNotify) {
-        _pendingNotify = false;
-        notifyListeners();
+      result = action();
+      if (result is Future) {
+        throw ArgumentError(
+          'runInTransaction requires a synchronous action; an async closure '
+          'would escape the transaction at its first await',
+        );
       }
-      return result;
+      _db.execute('COMMIT');
     } catch (_) {
-      _db.execute('ROLLBACK');
+      // Reset state before attempting ROLLBACK: if COMMIT itself failed
+      // (disk full, I/O error), SQLite may have already rolled the
+      // transaction back on its own, making an explicit ROLLBACK throw
+      // "no transaction is active" — which must neither mask the original
+      // error nor strand _pendingNotify to fire on an unrelated later
+      // transaction.
       _pendingNotify = false;
-      rethrow;
-    } finally {
       _inTransaction = false;
+      try {
+        _db.execute('ROLLBACK');
+      } on SqliteException {
+        // Already rolled back by SQLite; the rethrow below carries the
+        // error that actually caused the failure.
+      }
+      rethrow;
     }
+    // _inTransaction is reset before notifying, so a listener that
+    // synchronously calls back into the Store during this notification sees
+    // the connection as it really is — back in autocommit mode — instead of
+    // taking the reentrant no-BEGIN path against a transaction that no
+    // longer exists.
+    _inTransaction = false;
+    if (_pendingNotify) {
+      _pendingNotify = false;
+      notifyListeners();
+    }
+    return result;
   }
 
   /// Notifies immediately when called outside any transaction (the common
@@ -257,19 +298,19 @@ class Store extends ChangeNotifier implements EtagCache {
   /// for genuinely new watches, not for repeats.
   int upsertWatch(WatchKind kind, String displayName, {bool notify = true}) {
     final name = canonicalize(kind, displayName);
-    final inserted = _db.select(
+    _upsertWatchInsert ??= _db.prepare(
       'INSERT INTO watch (kind, name, display_name) VALUES (?, ?, ?) '
       'ON CONFLICT(kind, name) DO NOTHING RETURNING id',
-      [kind.name, name, displayName],
     );
+    final inserted = _upsertWatchInsert!.select([kind.name, name, displayName]);
     final int id;
     if (inserted.isNotEmpty) {
       id = inserted.first['id'] as int;
     } else {
-      final existing = _db.select(
+      _upsertWatchSelect ??= _db.prepare(
         'SELECT id FROM watch WHERE kind = ? AND name = ?',
-        [kind.name, name],
       );
+      final existing = _upsertWatchSelect!.select([kind.name, name]);
       if (existing.isEmpty) {
         // Reachable only if the conflicting row vanished between the two
         // statements, or a future unique constraint conflicts where
@@ -290,7 +331,7 @@ class Store extends ChangeNotifier implements EtagCache {
       }
       id = existing.first['id'] as int;
     }
-    if (notify) notifyListeners();
+    if (notify) _deferOrNotify();
     return id;
   }
 
@@ -320,48 +361,31 @@ class Store extends ChangeNotifier implements EtagCache {
     WatchKind? kind,
     int? limit,
   }) {
-    final sql = StringBuffer('SELECT * FROM watch');
-    final params = <Object?>[];
-    if (kind != null) {
-      sql.write(' WHERE kind = ?');
-      params.add(kind.name);
-    }
-    sql.write(' ORDER BY display_name');
-    var result = _db.select(sql.toString(), params).map(Watch.fromRow).toList();
+    var result = _baseWatches(kind);
 
     switch (filter) {
       case WatchFilter.all:
         break;
       case WatchFilter.unread:
-        final candidates = result.where((w) => !w.isSnoozed).toList();
+        final candidates = _unsnoozed(result);
         final unreadIds = _watchIdsWithUnreadRelease(
           candidates.map((w) => w.id!),
         );
-        result = candidates.where((w) => unreadIds.contains(w.id)).toList();
+        result = _membersOf(candidates, unreadIds);
       case WatchFilter.outdated:
-        final candidates = result.where((w) => !w.isSnoozed).toList();
+        final candidates = _unsnoozed(result);
         final outdatedIds = _outdatedWatchIds(candidates.map((w) => w.id!));
-        result = candidates.where((w) => outdatedIds.contains(w.id)).toList();
+        result = _membersOf(candidates, outdatedIds);
     }
 
     if (limit != null) result = result.take(limit).toList();
     return result;
   }
 
-  /// Single-pass equivalent of calling [watches] once per [WatchFilter]:
-  /// the base `SELECT * FROM watch` runs once, and `unread`/`outdated`
-  /// membership is derived from that same result via the same two batched
-  /// `IN`-queries [watches] already uses — instead of each of the three
-  /// filters rerunning its own full table scan. Returns exactly what three
-  /// separate `watches(filter: f)` calls would today: same rows, same order,
-  /// same snoozed-watch exclusion for `unread`/`outdated`. Exists for a
-  /// caller (the AppShell masthead) that needs all three filters'-worth of
-  /// watches simultaneously and would otherwise pay for the base scan three
-  /// times and the two `IN`-queries twice each per rebuild.
-  Map<WatchFilter, List<Watch>> watchesByFilter({
-    WatchKind? kind,
-    int? limit,
-  }) {
+  /// The base query [watches] and [watchesByFilter] share: every watch,
+  /// optionally narrowed to one [kind], ordered by `display_name`. Extracted
+  /// so the two functions cannot drift apart on what "the watch list" means.
+  List<Watch> _baseWatches(WatchKind? kind) {
     final sql = StringBuffer('SELECT * FROM watch');
     final params = <Object?>[];
     if (kind != null) {
@@ -369,26 +393,51 @@ class Store extends ChangeNotifier implements EtagCache {
       params.add(kind.name);
     }
     sql.write(' ORDER BY display_name');
-    final all = _db.select(sql.toString(), params).map(Watch.fromRow).toList();
+    return _db.select(sql.toString(), params).map(Watch.fromRow).toList();
+  }
 
-    final candidates = all.where((w) => !w.isSnoozed).toList();
-    final unreadIds = _watchIdsWithUnreadRelease(candidates.map((w) => w.id!));
-    final outdatedIds = _outdatedWatchIds(candidates.map((w) => w.id!));
+  static List<Watch> _unsnoozed(List<Watch> watches) =>
+      watches.where((w) => !w.isSnoozed).toList();
 
-    var unread = candidates.where((w) => unreadIds.contains(w.id)).toList();
-    var outdated = candidates.where((w) => outdatedIds.contains(w.id)).toList();
-    var allResult = all;
-    if (limit != null) {
-      allResult = allResult.take(limit).toList();
-      unread = unread.take(limit).toList();
-      outdated = outdated.take(limit).toList();
+  static List<Watch> _membersOf(List<Watch> candidates, Set<int> ids) =>
+      candidates.where((w) => ids.contains(w.id)).toList();
+
+  /// Single-pass equivalent of calling [watches] once per [WatchFilter]:
+  /// the base `SELECT * FROM watch` runs once, and `unread`/`outdated`
+  /// membership is derived from that same result via the same two batched
+  /// `IN`-queries [watches] already uses — instead of each of the three
+  /// filters rerunning its own full table scan. Built from the same
+  /// [_baseWatches]/[_unsnoozed]/[_membersOf] pieces [watches] uses, so it
+  /// returns exactly what three separate `watches(filter: f)` calls would:
+  /// same rows, same order, same snoozed-watch exclusion for
+  /// `unread`/`outdated` — `store_test.dart` asserts that equivalence
+  /// directly. Exists for a caller (the AppShell masthead) that needs all
+  /// three filters'-worth of watches simultaneously and would otherwise pay
+  /// for the base scan three times per rebuild (the two `IN`-queries only
+  /// ever ran once each; the redundancy was in the base scans).
+  Map<WatchFilter, List<Watch>> watchesByFilter({
+    WatchKind? kind,
+    int? limit,
+  }) {
+    final all = _baseWatches(kind);
+    final candidates = _unsnoozed(all);
+    final candidateIds = candidates.map((w) => w.id!).toList();
+    final unreadIds = _watchIdsWithUnreadRelease(candidateIds);
+    final outdatedIds = _outdatedWatchIds(candidateIds);
+
+    List<Watch> select(WatchFilter f) {
+      // An exhaustive switch, so adding a WatchFilter value refuses to
+      // compile here rather than silently leaving the new filter without an
+      // entry in the returned map.
+      final result = switch (f) {
+        WatchFilter.all => all,
+        WatchFilter.unread => _membersOf(candidates, unreadIds),
+        WatchFilter.outdated => _membersOf(candidates, outdatedIds),
+      };
+      return limit == null ? result : result.take(limit).toList();
     }
 
-    return {
-      WatchFilter.all: allResult,
-      WatchFilter.unread: unread,
-      WatchFilter.outdated: outdated,
-    };
+    return {for (final f in WatchFilter.values) f: select(f)};
   }
 
   /// Grouped-by-`watch_id` equivalent of asking, one watch at a time,
@@ -481,7 +530,7 @@ class Store extends ChangeNotifier implements EtagCache {
 
   void removeWatch(int id) {
     _db.execute('DELETE FROM watch WHERE id = ?', [id]);
-    notifyListeners();
+    _deferOrNotify();
   }
 
   /// Un-snoozing is `snooze(id, DateTime.now())` — there is no separate
@@ -491,7 +540,7 @@ class Store extends ChangeNotifier implements EtagCache {
       _epoch(until),
       watchId,
     ]);
-    notifyListeners();
+    _deferOrNotify();
   }
 
   /// Updates only the fields actually passed. `clearError: true` sets
@@ -535,7 +584,7 @@ class Store extends ChangeNotifier implements EtagCache {
       params.add(id);
       _db.execute('UPDATE watch SET ${sets.join(', ')} WHERE id = ?', params);
     }
-    notifyListeners();
+    _deferOrNotify();
   }
 
   /// Batched equivalent of calling [setWatchMeta] with only `lastError` for
@@ -550,11 +599,12 @@ class Store extends ChangeNotifier implements EtagCache {
   /// one column (`last_error`) across a batched `IN (...)` of ids — different
   /// enough query shapes that sharing one code path would only obscure both.
   ///
-  /// All chunks run inside a single transaction, so the call is atomic: a
-  /// failure partway through leaves no chunk committed rather than leaving
-  /// an arbitrary prefix of [watchIds] durably marked while the rest are
-  /// not — see [replaceUsagesForProject] for the same BEGIN/COMMIT/ROLLBACK
-  /// shape.
+  /// All chunks run inside a single transaction via [runInTransaction], so
+  /// the call is atomic: a failure partway through leaves no chunk committed
+  /// rather than leaving an arbitrary prefix of [watchIds] durably marked
+  /// while the rest are not — and, being reentrant, it also composes with a
+  /// caller's own [runInTransaction] batch instead of throwing on a nested
+  /// `BEGIN`.
   ///
   /// Notifies exactly once for the whole batch, no matter how many chunks
   /// the id list is split into internally, unlike the per-watch loop this
@@ -566,8 +616,7 @@ class Store extends ChangeNotifier implements EtagCache {
   void markUnattemptedStale(Iterable<int> watchIds, String message) {
     final ids = watchIds.toList();
     if (ids.isEmpty) return;
-    _db.execute('BEGIN');
-    try {
+    runInTransaction(() {
       // Each chunk binds `message` plus the chunk's own ids, so the chunk
       // size must leave room for that extra placeholder; 500 ids + 1
       // message is comfortably under SQLite's 999-parameter ceiling.
@@ -578,19 +627,8 @@ class Store extends ChangeNotifier implements EtagCache {
           [message, ...chunk],
         );
       }
-      _db.execute('COMMIT');
-    } catch (_) {
-      // Unreachable from the public API: reaching the UPDATE means the
-      // database is open and writable, and a store closed beforehand fails at
-      // BEGIN instead. It stays because a partially applied batch would leave
-      // some watches flagged stale and others not, which is exactly the
-      // all-or-nothing property refreshAll reports as staleMarkingFailed.
-      // coverage:ignore-start
-      _db.execute('ROLLBACK');
-      rethrow;
-      // coverage:ignore-end
-    }
-    notifyListeners();
+    });
+    _deferOrNotify();
   }
 
   // --- releases ----------------------------------------------------------------
@@ -625,7 +663,7 @@ class Store extends ChangeNotifier implements EtagCache {
     } finally {
       stmt.dispose();
     }
-    notifyListeners();
+    _deferOrNotify();
     return inserted;
   }
 
@@ -658,7 +696,7 @@ class Store extends ChangeNotifier implements EtagCache {
         [watchId, version],
       );
     }
-    notifyListeners();
+    _deferOrNotify();
   }
 
   // --- usages ----------------------------------------------------------------
@@ -832,12 +870,12 @@ class Store extends ChangeNotifier implements EtagCache {
 
   void addScanRoot(String path) {
     _db.execute('INSERT OR IGNORE INTO scan_root (path) VALUES (?)', [path]);
-    notifyListeners();
+    _deferOrNotify();
   }
 
   void removeScanRoot(String path) {
     _db.execute('DELETE FROM scan_root WHERE path = ?', [path]);
-    notifyListeners();
+    _deferOrNotify();
   }
 
   // --- meta and http cache -----------------------------------------------------

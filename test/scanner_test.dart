@@ -79,6 +79,40 @@ version = "1.0.210"
     expect(u.manifestFile, 'Cargo.lock');
   });
 
+  test('a Cargo.lock resolving two versions of one crate yields one usage '
+      'at the stalest pin, not a UNIQUE-constraint failure', () async {
+    write('app/Cargo.lock', '''
+[[package]]
+name = "serde"
+version = "1.0.100"
+
+[[package]]
+name = "serde"
+version = "1.0.210"
+''');
+    final s = _store();
+    final r = await scanDirectory(s, tmp.path);
+    expect(r.errors, isEmpty);
+    final u = s.usagesFor(s.watches().single.id!).single;
+    // driftFor measures from the stalest pin — the repo that needs work —
+    // so the lower resolved version is the one worth keeping.
+    expect(u.pinnedVersion, '1.0.100');
+  });
+
+  test('a package listed in both dependencies and devDependencies yields '
+      'one runtime usage, not a UNIQUE-constraint failure', () async {
+    write('app/package.json', '''
+{"dependencies":{"left-pad":"^1.3.0"},
+ "devDependencies":{"left-pad":"^1.0.0"}}
+''');
+    final s = _store();
+    final r = await scanDirectory(s, tmp.path);
+    expect(r.errors, isEmpty);
+    final u = s.usagesFor(s.watches().single.id!).single;
+    expect(u.isDevDep, isFalse);
+    expect(u.pinnedVersion, '^1.3.0');
+  });
+
   test('prefers package-lock.json over package.json when both are present '
       '(I6)', () async {
     write('app/package.json', '''
