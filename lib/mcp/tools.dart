@@ -84,6 +84,11 @@ String? _coerceOptionalString(Object? v, String paramName) {
 /// Go does not fold case at all), so trying it is what lets add_watch and
 /// get_watch agree on every spelling — and, just as importantly, refuse to
 /// agree on a Go module path differing only in case.
+///
+/// Cost: at most one watchByIdentity lookup per WatchKind (a handful of
+/// indexed point queries), plus a full watches() scan only when every kind
+/// misses. That bound is deliberate — collapsing it into one query would mean
+/// duplicating each kind's canonicalization rule in SQL.
 int _resolveWatchByName(Store store, String name) {
   for (final k in WatchKind.values) {
     final w = store.watchByIdentity(k, canonicalize(k, name));
