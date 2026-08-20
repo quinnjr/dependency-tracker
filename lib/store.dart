@@ -77,6 +77,8 @@ class Store extends ChangeNotifier implements EtagCache {
 
   final Database _db;
   bool _closed = false;
+  bool _inTransaction = false;
+  bool _pendingNotify = false;
 
   static Store open(String file) {
     final db = sqlite3.open(file);
@@ -171,6 +173,62 @@ class Store extends ChangeNotifier implements EtagCache {
   static Iterable<List<T>> _chunks<T>(List<T> items, [int size = 500]) sync* {
     for (var i = 0; i < items.length; i += size) {
       yield items.sublist(i, i + size > items.length ? items.length : i + size);
+    }
+  }
+
+  /// Runs [action] inside a single `BEGIN`/`COMMIT` transaction, rolling back
+  /// on any exception raised by [action] or by SQLite itself. Exists so a
+  /// caller reconciling many rows across several Store calls — [scanDirectory]
+  /// upserting every dependency in a manifest and then replacing that
+  /// manifest's usages is the only caller today — pays for one fsync-backed
+  /// commit instead of one implicit autocommit per call, the same batching
+  /// [replaceUsagesForProject] and [markUnattemptedStale] already do on their
+  /// own for a single kind of write.
+  ///
+  /// Reentrant: a call made while a transaction is already open — directly,
+  /// or via a Store method such as [replaceUsagesForProject] that wraps its
+  /// own writes in one — runs [action] against the already-open transaction
+  /// instead of issuing a nested `BEGIN`, which SQLite rejects. Only the
+  /// outermost call commits or rolls back; an inner call's exception still
+  /// propagates out to it.
+  ///
+  /// A nested mutator that would otherwise notify immediately (like
+  /// [replaceUsagesForProject]) instead defers via [_deferOrNotify], so a
+  /// caller batching several such mutators in one [runInTransaction] still
+  /// gets exactly one notification, fired only once the outermost call's
+  /// `COMMIT` actually succeeds — never for a batch that rolls back, per the
+  /// same "no state changed, no notification" rule [markUnattemptedStale]
+  /// documents.
+  T runInTransaction<T>(T Function() action) {
+    if (_inTransaction) return action();
+    _db.execute('BEGIN');
+    _inTransaction = true;
+    try {
+      final result = action();
+      _db.execute('COMMIT');
+      if (_pendingNotify) {
+        _pendingNotify = false;
+        notifyListeners();
+      }
+      return result;
+    } catch (_) {
+      _db.execute('ROLLBACK');
+      _pendingNotify = false;
+      rethrow;
+    } finally {
+      _inTransaction = false;
+    }
+  }
+
+  /// Notifies immediately when called outside any transaction (the common
+  /// case), or defers to a single notification fired by the outermost
+  /// [runInTransaction] call once it commits, when called from within one.
+  /// See [runInTransaction] for why this exists.
+  void _deferOrNotify() {
+    if (_inTransaction) {
+      _pendingNotify = true;
+    } else {
+      notifyListeners();
     }
   }
 
@@ -288,6 +346,49 @@ class Store extends ChangeNotifier implements EtagCache {
 
     if (limit != null) result = result.take(limit).toList();
     return result;
+  }
+
+  /// Single-pass equivalent of calling [watches] once per [WatchFilter]:
+  /// the base `SELECT * FROM watch` runs once, and `unread`/`outdated`
+  /// membership is derived from that same result via the same two batched
+  /// `IN`-queries [watches] already uses — instead of each of the three
+  /// filters rerunning its own full table scan. Returns exactly what three
+  /// separate `watches(filter: f)` calls would today: same rows, same order,
+  /// same snoozed-watch exclusion for `unread`/`outdated`. Exists for a
+  /// caller (the AppShell masthead) that needs all three filters'-worth of
+  /// watches simultaneously and would otherwise pay for the base scan three
+  /// times and the two `IN`-queries twice each per rebuild.
+  Map<WatchFilter, List<Watch>> watchesByFilter({
+    WatchKind? kind,
+    int? limit,
+  }) {
+    final sql = StringBuffer('SELECT * FROM watch');
+    final params = <Object?>[];
+    if (kind != null) {
+      sql.write(' WHERE kind = ?');
+      params.add(kind.name);
+    }
+    sql.write(' ORDER BY display_name');
+    final all = _db.select(sql.toString(), params).map(Watch.fromRow).toList();
+
+    final candidates = all.where((w) => !w.isSnoozed).toList();
+    final unreadIds = _watchIdsWithUnreadRelease(candidates.map((w) => w.id!));
+    final outdatedIds = _outdatedWatchIds(candidates.map((w) => w.id!));
+
+    var unread = candidates.where((w) => unreadIds.contains(w.id)).toList();
+    var outdated = candidates.where((w) => outdatedIds.contains(w.id)).toList();
+    var allResult = all;
+    if (limit != null) {
+      allResult = allResult.take(limit).toList();
+      unread = unread.take(limit).toList();
+      outdated = outdated.take(limit).toList();
+    }
+
+    return {
+      WatchFilter.all: allResult,
+      WatchFilter.unread: unread,
+      WatchFilter.outdated: outdated,
+    };
   }
 
   /// Grouped-by-`watch_id` equivalent of asking, one watch at a time,
@@ -688,35 +789,32 @@ class Store extends ChangeNotifier implements EtagCache {
     String manifestFile,
     List<Usage> usages,
   ) {
-    _db.execute('BEGIN');
-    PreparedStatement? stmt;
-    try {
-      _db.execute(
-        'DELETE FROM usage WHERE project_path = ? AND manifest_file = ?',
-        [projectPath, manifestFile],
-      );
-      stmt = _db.prepare(
-        'INSERT INTO usage (watch_id, project_path, manifest_file, '
-        'pinned_version, is_resolved, is_dev_dep) VALUES (?, ?, ?, ?, ?, ?)',
-      );
-      for (final u in usages) {
-        stmt.execute([
-          u.watchId,
-          u.projectPath,
-          u.manifestFile,
-          u.pinnedVersion,
-          u.isResolved ? 1 : 0,
-          u.isDevDep ? 1 : 0,
-        ]);
+    runInTransaction(() {
+      PreparedStatement? stmt;
+      try {
+        _db.execute(
+          'DELETE FROM usage WHERE project_path = ? AND manifest_file = ?',
+          [projectPath, manifestFile],
+        );
+        stmt = _db.prepare(
+          'INSERT INTO usage (watch_id, project_path, manifest_file, '
+          'pinned_version, is_resolved, is_dev_dep) VALUES (?, ?, ?, ?, ?, ?)',
+        );
+        for (final u in usages) {
+          stmt.execute([
+            u.watchId,
+            u.projectPath,
+            u.manifestFile,
+            u.pinnedVersion,
+            u.isResolved ? 1 : 0,
+            u.isDevDep ? 1 : 0,
+          ]);
+        }
+      } finally {
+        stmt?.dispose();
       }
-      _db.execute('COMMIT');
-    } catch (_) {
-      _db.execute('ROLLBACK');
-      rethrow;
-    } finally {
-      stmt?.dispose();
-    }
-    notifyListeners();
+    });
+    _deferOrNotify();
   }
 
   /// Every distinct `project_path` in `usage`, ordered.

@@ -407,6 +407,55 @@ void main() {
     expect(notified, 2);
   });
 
+  test('runInTransaction folds several notify:false/deferred mutators into '
+      'one notification, mirroring markUnattemptedStale', () {
+    var notified = 0;
+    store.addListener(() => notified++);
+    late int http;
+
+    store.runInTransaction(() {
+      http = store.upsertWatch(WatchKind.pub, 'http', notify: false);
+      final yaml = store.upsertWatch(WatchKind.pub, 'yaml', notify: false);
+      store.replaceUsagesForProject('/r/one', 'pubspec.lock', [
+        _usage(http, '/r/one'),
+        _usage(yaml, '/r/one'),
+      ]);
+    });
+
+    expect(notified, 1);
+    expect(store.usagesFor(http).single.projectPath, '/r/one');
+  });
+
+  test('runInTransaction rolls back every write in the batch — including an '
+      'upsertWatch that ran earlier in the same call — when a later write '
+      'fails, and does not notify', () {
+    var notified = 0;
+    store.addListener(() => notified++);
+    final watchCountBefore = store.watches().length;
+
+    expect(
+      () => store.runInTransaction(() {
+        // This insert would otherwise persist a brand-new watch...
+        final brandNew = store.upsertWatch(
+          WatchKind.pub,
+          'brand-new',
+          notify: false,
+        );
+        // ...but this second write in the same batch violates the UNIQUE
+        // constraint on (watch_id, project_path, manifest_file), so the whole
+        // transaction — including the upsertWatch above — must roll back.
+        store.replaceUsagesForProject('/r/one', 'pubspec.lock', [
+          _usage(brandNew, '/r/one'),
+          _usage(brandNew, '/r/one'),
+        ]);
+      }),
+      throwsA(anything),
+    );
+
+    expect(store.watches().length, watchCountBefore);
+    expect(notified, 0);
+  });
+
   test('metaSet notifies listeners, unlike putCache, its http_cache '
       'counterpart', () {
     var notified = 0;

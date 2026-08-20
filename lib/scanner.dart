@@ -130,24 +130,34 @@ Future<ScanResult> scanDirectory(
         continue;
       }
 
-      final usages = <Usage>[];
-      for (final d in parsed) {
-        // notify: false — replaceUsagesForProject below notifies once for
-        // the whole manifest; without this a 2,000-dependency monorepo scan
-        // fires 2,000 notifications instead of one per manifest.
-        final watchId = store.upsertWatch(d.kind, d.name, notify: false);
-        usages.add(
-          Usage(
-            watchId: watchId,
-            projectPath: projectPath,
-            manifestFile: filename,
-            pinnedVersion: d.version,
-            isResolved: d.isResolved,
-            isDevDep: d.isDevDep,
-          ),
-        );
-      }
-      store.replaceUsagesForProject(projectPath, filename, usages);
+      // The whole manifest's reconciliation — one upsertWatch per parsed
+      // dependency plus the replaceUsagesForProject that follows — runs
+      // inside one outer transaction, so a 2,000-dependency monorepo scan
+      // costs one fsync-backed commit instead of 2,000 implicit-autocommit
+      // round trips. replaceUsagesForProject opens its own BEGIN/COMMIT when
+      // called on its own; runInTransaction's reentrant guard keeps that from
+      // nesting here.
+      final usages = store.runInTransaction(() {
+        final usages = <Usage>[];
+        for (final d in parsed) {
+          // notify: false — replaceUsagesForProject below notifies once for
+          // the whole manifest; without this a 2,000-dependency monorepo scan
+          // fires 2,000 notifications instead of one per manifest.
+          final watchId = store.upsertWatch(d.kind, d.name, notify: false);
+          usages.add(
+            Usage(
+              watchId: watchId,
+              projectPath: projectPath,
+              manifestFile: filename,
+              pinnedVersion: d.version,
+              isResolved: d.isResolved,
+              isDevDep: d.isDevDep,
+            ),
+          );
+        }
+        store.replaceUsagesForProject(projectPath, filename, usages);
+        return usages;
+      });
       deps += usages.length;
     }
   }

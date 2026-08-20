@@ -70,11 +70,9 @@ class _AppShellState extends State<AppShell> {
         // Every filter's membership is needed anyway — the masthead shows all
         // three counts — so the lists are built once here and the selected one
         // is handed to the list pane. That makes the counts and the rows
-        // provably the same query rather than two that could disagree.
-        final byFilter = {
-          for (final f in WatchFilter.values)
-            f: widget.store.watches(filter: f),
-        };
+        // provably the same query rather than two that could disagree, and
+        // watchesByFilter runs the base scan once instead of once per filter.
+        final byFilter = widget.store.watchesByFilter();
         final shown = byFilter[_filter]!;
 
         return Scaffold(
