@@ -2,9 +2,11 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import 'canonicalize.dart';
 import 'manifests.dart';
 import 'models.dart';
 import 'store.dart';
+import 'versions.dart';
 
 /// Directories that never contain a project worth scanning but do contain
 /// thousands of files, including manifests belonging to other packages.
@@ -137,9 +139,11 @@ Future<ScanResult> scanDirectory(
       // round trips. replaceUsagesForProject opens its own BEGIN/COMMIT when
       // called on its own; runInTransaction's reentrant guard keeps that from
       // nesting here.
+      final deduped = _dedupByIdentity(parsed);
+
       final usages = store.runInTransaction(() {
         final usages = <Usage>[];
-        for (final d in parsed) {
+        for (final d in deduped) {
           // notify: false — replaceUsagesForProject below notifies once for
           // the whole manifest; without this a 2,000-dependency monorepo scan
           // fires 2,000 notifications instead of one per manifest.
@@ -167,4 +171,41 @@ Future<ScanResult> scanDirectory(
     depsFound: deps,
     errors: errors,
   );
+}
+
+/// Collapses [parsed] to one dependency per canonical package identity.
+///
+/// One manifest can legitimately name the same package twice: a
+/// `Cargo.lock` resolving two versions of one crate, or a
+/// `Cargo.toml`/`package.json` listing a package under both its normal and
+/// dev sections. The `usage` table allows only one row per
+/// `(watch_id, project_path, manifest_file)`, so without this collapse the
+/// second occurrence turns the manifest's whole reconciliation into a
+/// UNIQUE-constraint failure.
+///
+/// When duplicates disagree, the survivor is chosen by what the rest of the
+/// app can do with it: a resolved pin beats a range (only a pin can be
+/// compared against a release), a runtime dependency beats a dev-only one,
+/// and between two resolved pins the *lower* version wins — [Store.driftFor]
+/// measures drift from the stalest pin, because that is the dependency that
+/// actually needs work.
+List<ParsedDep> _dedupByIdentity(List<ParsedDep> parsed) {
+  final byIdentity = <String, ParsedDep>{};
+  for (final d in parsed) {
+    final key = '${d.kind.name}:${canonicalize(d.kind, d.name)}';
+    final prev = byIdentity[key];
+    byIdentity[key] = prev == null ? d : _preferred(prev, d);
+  }
+  return byIdentity.values.toList();
+}
+
+ParsedDep _preferred(ParsedDep a, ParsedDep b) {
+  if (a.isResolved != b.isResolved) return a.isResolved ? a : b;
+  if (a.isDevDep != b.isDevDep) return a.isDevDep ? b : a;
+  if (a.isResolved &&
+      isWellFormedVersion(a.version) &&
+      isWellFormedVersion(b.version)) {
+    return compareVersions(a.version, b.version) <= 0 ? a : b;
+  }
+  return a;
 }

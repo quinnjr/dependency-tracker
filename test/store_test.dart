@@ -456,6 +456,118 @@ void main() {
     expect(notified, 0);
   });
 
+  test('markUnattemptedStale composes inside a runInTransaction batch '
+      'instead of throwing on a nested BEGIN', () {
+    final id = store.upsertWatch(WatchKind.pub, 'http');
+    var notified = 0;
+    store.addListener(() => notified++);
+
+    store.runInTransaction(() {
+      store.upsertWatch(WatchKind.pub, 'yaml', notify: false);
+      store.markUnattemptedStale([id], 'skipped: rate limited');
+    });
+
+    expect(store.watchById(id)!.lastError, 'skipped: rate limited');
+    expect(notified, 1);
+  });
+
+  test('deferred notification fires after COMMIT, not mid-transaction — and '
+      'formerly-immediate mutators defer too', () {
+    var notified = 0;
+    store.addListener(() => notified++);
+
+    store.runInTransaction(() {
+      final id = store.upsertWatch(WatchKind.pub, 'http');
+      store.snooze(id, DateTime.now());
+      store.replaceUsagesForProject('/r/one', 'pubspec.lock', [
+        _usage(id, '/r/one'),
+      ]);
+      // Three mutators that each notify immediately outside a transaction
+      // have run — but nothing may fire until the COMMIT below succeeds.
+      expect(notified, 0);
+    });
+
+    expect(notified, 1);
+  });
+
+  test('a listener that synchronously mutates the store during the '
+      'post-commit notification runs outside the finished transaction', () {
+    var reentered = false;
+    var notified = 0;
+    store.addListener(() {
+      notified++;
+      if (!reentered) {
+        reentered = true;
+        // Re-entering here must see the transaction as over: this call gets
+        // its own transaction and its own notification, not a silent ride on
+        // a COMMIT that already happened.
+        store.replaceUsagesForProject('/r/reenter', 'pubspec.lock', []);
+      }
+    });
+
+    store.runInTransaction(() {
+      store.upsertWatch(WatchKind.pub, 'http', notify: false);
+      store.replaceUsagesForProject('/r/one', 'pubspec.lock', []);
+    });
+
+    expect(reentered, isTrue);
+    expect(notified, 2);
+  });
+
+  test('runInTransaction rejects an async action instead of committing at '
+      'its first await', () {
+    expect(
+      // ignore: void_checks
+      () => store.runInTransaction(() async {}),
+      throwsArgumentError,
+    );
+    // The rejected call must not leave a transaction open or a deferred
+    // notification pending: a later ordinary mutation still works and
+    // notifies exactly once.
+    var notified = 0;
+    store.addListener(() => notified++);
+    store.upsertWatch(WatchKind.pub, 'http');
+    expect(notified, 1);
+  });
+
+  test('watchesByFilter returns exactly what three watches(filter: f) calls '
+      'would', () {
+    final current = store.upsertWatch(WatchKind.pub, 'current');
+    final behind = store.upsertWatch(WatchKind.pub, 'behind');
+    final snoozed = store.upsertWatch(WatchKind.pub, 'snoozed');
+
+    // `behind` is outdated with an unread release; `snoozed` would be both
+    // but is hidden from unread/outdated by its snooze; `current` is neither.
+    store.insertReleases(behind, [
+      Release(watchId: behind, version: '2.0.0'),
+    ]);
+    store.replaceUsagesForProject('/r/one', 'pubspec.lock', [
+      _usage(behind, '/r/one'),
+    ]);
+    store.insertReleases(snoozed, [
+      Release(watchId: snoozed, version: '2.0.0'),
+    ]);
+    store.replaceUsagesForProject('/r/two', 'pubspec.lock', [
+      _usage(snoozed, '/r/two'),
+    ]);
+    store.snooze(snoozed, DateTime.now().add(const Duration(days: 1)));
+    store.insertReleases(current, [
+      Release(watchId: current, version: '1.0.0', read: true),
+    ]);
+
+    final byFilter = store.watchesByFilter();
+    for (final f in WatchFilter.values) {
+      expect(
+        byFilter[f]!.map((w) => w.id).toList(),
+        store.watches(filter: f).map((w) => w.id).toList(),
+        reason: 'filter $f must match watches(filter: $f)',
+      );
+    }
+    expect(byFilter[WatchFilter.unread]!.single.id, behind);
+    expect(byFilter[WatchFilter.outdated]!.single.id, behind);
+    expect(byFilter[WatchFilter.all]!.length, 3);
+  });
+
   test('metaSet notifies listeners, unlike putCache, its http_cache '
       'counterpart', () {
     var notified = 0;
