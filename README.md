@@ -6,10 +6,12 @@ whether you care. It seeds its watchlist by scanning real project files on
 disk, and it deduplicates: a package used by several repos is one row with
 several usages, not one row per repo.
 
-It is not a bot — it never opens pull requests or edits manifests, and it does
-not poll in the background or push notifications. There is no tray icon and
-no CI/headless mode. It is a GUI app that shows you what's new when you open
-or refresh it, and it has an MCP side door for agents.
+It is not a bot — it never opens pull requests or edits manifests, and it
+does not poll in the background or push notifications. There is no tray
+icon. Refreshes happen when you press the button, in the desktop app or in
+the browser. The one headless mode is the server (`bin/server.dart`), which
+exists to put that same GUI in a browser — it too fetches only when asked.
+Both modes have an MCP side door for agents.
 
 ## Ecosystems
 
@@ -28,19 +30,29 @@ default path, so the app works fully without a token.
 
 ## Secrets
 
-The GitHub PAT and the MCP bearer token live only in the host keyring — never
-in the SQLite database, a config file, or logs. On Linux this requires a
-running secret service such as gnome-keyring; without one, the MCP server
-refuses to start rather than falling back to an unauthenticated server or a
-plaintext file.
+The GitHub PAT never sits in plaintext at rest — not in the SQLite
+database, a config file, or logs:
+
+- **Desktop**: the PAT lives in the host keyring. On Linux this requires a
+  running secret service such as gnome-keyring; without one the token
+  simply cannot be saved (the MCP server no longer depends on the keyring).
+- **Server**: the PAT is AES-256-GCM-encrypted into the server's SQLite,
+  keyed by `deptracker.key` — 64 random bytes generated on first run,
+  written mode 0600 beside the database. A leaked database or backup is
+  useless without that file. Nothing secret is read from environment
+  variables.
+
+MCP API keys are stored only as SHA-256 hashes (see below), which is not
+secret material, and user passwords only as Argon2id hashes.
 
 ## MCP server
 
-While the app's window is open, it also runs a local MCP server (Streamable
-HTTP) on `127.0.0.1` so an agent can read the same watchlist data and curate
-it. Every request must present a bearer token, and the `Origin` header is
-validated to guard against DNS-rebinding from other local processes or a
-browser tab.
+While the desktop app's window is open, it runs a local MCP server
+(Streamable HTTP) on `127.0.0.1`; the web server exposes the same thing at
+`/mcp`. Agents authenticate with named API keys managed in Settings: each
+key is shown exactly once at creation, only its hash is stored, and any key
+can be revoked on its own. The `Origin` header is validated to guard
+against DNS-rebinding from other local processes or a browser tab.
 
 ## Running it
 
@@ -50,34 +62,34 @@ flutter run -d linux
 
 On Linux, a secret service such as gnome-keyring must be running; see the Secrets section for details.
 
-## Web build
+## Web mode (server + browser)
 
 ```
 flutter build web --release
+dart run bin/server.dart --web-root build/web
 ```
 
-The output under `build/web/` is static files, meant to be served by a
-container image later — there is no hosted deployment in this repo. SQLite
-runs as WebAssembly (`web/sqlite3.wasm`, vendored and checksummed) with the
-watch database persisted in the browser's IndexedDB.
+The server owns the engine: it holds the SQLite file (default
+`data/deptracker.db`, with `deptracker.key` beside it), does all the
+registry/GitHub/feed fetching, scans its own filesystem, and serves three
+things from one port — the built frontend, a JSON API under `/api`, and
+MCP at `/mcp`. The browser is a thin client: it mirrors the server's data
+into in-memory WASM SQLite (`web/sqlite3.wasm`, vendored and checksummed)
+and sends every change back over the API. Nothing persists in the browser.
+A Docker image serving this is a later effort; `--db`, `--web-root`,
+`--port`, and `--bind` cover the meanwhile.
 
-A browser build is a reduced version of the app, by nature rather than by
-switch:
+Because fetching happens server-side, the browser has none of the CORS
+limitations a purely static build would: GitHub Atom feeds and arbitrary
+RSS watches work exactly as on desktop.
 
-- **No disk scanning.** There is no filesystem; watches are added by hand.
-- **No MCP server.** Nothing can listen on a socket in a page.
-- **The GitHub token is kept in memory for the tab session only.** There is
-  no keyring, and this app does not store secrets at rest in weaker places —
-  re-enter the token next visit.
-- **GitHub watches effectively require a token.** The no-token default path
-  reads `github.com/.../releases.atom`, and github.com sends no CORS
-  headers, so a browser cannot fetch it; `api.github.com` does allow it,
-  with a token or without one at 60 requests/hour.
-- **RSS/Atom watches work only when the feed host allows cross-origin
-  reads.** Failures surface per-watch as fetch errors, same as any other.
-
-The registry APIs (pub.dev, npm, crates.io, PyPI, the Go module proxy) allow
-cross-origin requests and work unchanged.
+Accounts gate the web UI. The first visit offers a create-account form and
+that account becomes the admin; registration stays open until an admin
+closes it in Settings (accounts can also be managed with
+`dart run bin/server.dart --add-user` / `--reset-password`). Sessions are a
+15-minute JWT held in page memory plus a rotating 30-day HttpOnly refresh
+cookie, so a revisit is a silent refresh, not a password prompt, and a
+stolen database contains no usable session material.
 
 ## Testing
 
@@ -101,9 +113,11 @@ invisible to the new build:
 
 - **Re-enter your GitHub token** in Settings. Without it, refreshes fall back
   to unauthenticated rate limits rather than failing loudly.
-- **Re-copy the MCP token** into any agent configured against this app. The
-  token is regenerated on first launch, so an agent still presenting the old
-  one gets `401 Unauthorized`.
+- **Create an MCP API key** in Settings and put it in any agent configured
+  against this app. The old single bearer token (which lived in the keyring)
+  is gone entirely — keys are now named, revocable, shown once at creation,
+  and stored only as hashes — so an agent still presenting the old token
+  gets `401 Unauthorized`.
 
 The watch database is untouched — it lives under a path derived from the app
 *name*, not the app id.
