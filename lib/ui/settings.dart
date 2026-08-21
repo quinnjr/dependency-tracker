@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../mcp/transport.dart';
+import '../mcp/endpoint.dart';
+import '../models.dart';
 import '../redact.dart';
-import '../scanner.dart';
 import '../secrets.dart';
 import '../store.dart';
 import 'theme.dart';

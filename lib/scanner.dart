@@ -8,6 +8,8 @@ import 'models.dart';
 import 'store.dart';
 import 'versions.dart';
 
+export 'models.dart' show ScanResult;
+
 /// Directories that never contain a project worth scanning but do contain
 /// thousands of files, including manifests belonging to other packages.
 const Set<String> skipDirectories = {
@@ -31,18 +33,6 @@ const Map<String, String> _supersedes = {
   'package-lock.json': 'package.json',
   'pnpm-lock.yaml': 'package.json',
 };
-
-class ScanResult {
-  const ScanResult({
-    required this.projectsScanned,
-    required this.depsFound,
-    required this.errors,
-  });
-
-  final int projectsScanned;
-  final int depsFound;
-  final List<String> errors;
-}
 
 /// Walks every scan root configured in [store] and reconciles the store with
 /// what it finds. See [scanDirectory] for the per-root behavior.

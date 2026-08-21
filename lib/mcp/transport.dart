@@ -7,9 +7,9 @@ import 'package:mcp_sse_server/mcp_sse_server.dart' as mcp;
 
 import '../paths.dart';
 import '../redact.dart';
+import 'endpoint.dart';
 
-/// Single endpoint for the Streamable HTTP transport.
-const String mcpPath = '/mcp';
+export 'endpoint.dart' show mcpPath;
 
 /// How long a session may sit idle before it is dropped.
 ///

@@ -130,3 +130,18 @@ class FetchedRelease {
     url: notesUrl ?? url,
   );
 }
+
+/// Lives here rather than in scanner.dart so the web build — which renders
+/// scan UI copy but compiles the dart:io scanner out — can name the type
+/// without dragging dart:io in.
+class ScanResult {
+  const ScanResult({
+    required this.projectsScanned,
+    required this.depsFound,
+    required this.errors,
+  });
+
+  final int projectsScanned;
+  final int depsFound;
+  final List<String> errors;
+}
