@@ -203,4 +203,56 @@ void main() {
       expect(mirror.scanRoots(), isEmpty);
     },
   );
+
+  test(
+    'a transport error becomes a banner, not an escaping async error',
+    () async {
+      final throwing = MockClient(
+        (_) async => throw Exception('connection refused'),
+      );
+      final sync = SyncClient(
+        Uri.parse('http://server/'),
+        mirror,
+        client: throwing,
+      );
+      // A void-returning mutation must not leak the throw into the zone.
+      sync.mutations.addScanRoot('/srv/code');
+      await Future<void>.delayed(Duration.zero);
+      expect(sync.syncError.value, contains('could not reach the server'));
+      expect(mirror.scanRoots(), isEmpty);
+    },
+  );
+
+  test(
+    'concurrent 401s spend the rotating refresh token exactly once',
+    () async {
+      var refreshes = 0;
+      var refreshed = false;
+      final client = MockClient((request) async {
+        final path = request.url.path;
+        if (path == '/api/auth/refresh') {
+          refreshes++;
+          refreshed = true;
+          return http.Response(
+            jsonEncode({'accessToken': 'jwt-2', 'role': 'member'}),
+            200,
+          );
+        }
+        // Data requests 401 until the single refresh lands, then succeed.
+        if (!refreshed) return http.Response('{"error":"expired"}', 401);
+        return http.Response(
+          jsonEncode({'snapshot': serverStore.exportSnapshot()}),
+          200,
+        );
+      });
+      final sync = SyncClient(
+        Uri.parse('http://server/'),
+        mirror,
+        client: client,
+      );
+      // Two requests race the same expiry; both see 401 and both want a refresh.
+      await Future.wait([sync.hydrate(), sync.hydrate()]);
+      expect(refreshes, 1);
+    },
+  );
 }

@@ -132,9 +132,20 @@ void main() {
       expect(await auth.login('owner', 'a-strong-password'), isNotNull);
       await expectLater(
         auth.register('OWNER', 'other-password-42'),
-        throwsA(anything),
+        throwsA(isA<UsernameTaken>()),
       );
     });
+
+    test(
+      'a duplicate registration is UsernameTaken, not a raw DB error',
+      () async {
+        await auth.register('owner', 'a-strong-password');
+        await expectLater(
+          auth.register('owner', 'a-different-password'),
+          throwsA(isA<UsernameTaken>()),
+        );
+      },
+    );
 
     test(
       'refresh rotates: old token dead on second use, new one works',

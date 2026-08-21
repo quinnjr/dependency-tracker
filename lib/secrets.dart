@@ -2,14 +2,24 @@ import 'redact.dart';
 
 const String _githubKey = 'github_pat';
 
+/// The secret store could not be reached. A backend-neutral supertype so a
+/// caller (the settings pane) can catch one type for both the desktop
+/// keyring and the web REST backend, and each backend can carry its own
+/// message — the web one must not tell a browser user to start
+/// gnome-keyring.
+abstract class SecretStoreUnavailable implements Exception {
+  Object get cause;
+}
+
 /// Raised when the host has no usable keyring.
 ///
 /// The spec forbids falling back to a plaintext file, so this is surfaced to
 /// the user rather than swallowed. It costs only the optional GitHub PAT:
 /// the MCP server authenticates against hashed API keys in the store, not
 /// keyring material, so it runs regardless.
-class KeyringUnavailable implements Exception {
+class KeyringUnavailable implements SecretStoreUnavailable {
   KeyringUnavailable(this.cause);
+  @override
   final Object cause;
 
   @override
@@ -88,7 +98,10 @@ class Secrets {
   Future<T> _guard<T>(Future<T> Function() action) async {
     try {
       return await action();
-    } on KeyringUnavailable {
+    } on SecretStoreUnavailable {
+      // A backend that already framed its own unavailability (the web REST
+      // backend, the keyring) keeps its message; only a truly unexpected
+      // error gets wrapped as a keyring failure.
       rethrow;
     } catch (e) {
       throw KeyringUnavailable(e);

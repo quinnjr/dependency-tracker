@@ -23,6 +23,14 @@ class RegistrationClosed implements Exception {
   String toString() => 'registration is closed';
 }
 
+/// Thrown by [Auth.register] when the username is already taken. Typed so
+/// the HTTP layer answers a clean 409 rather than letting the UNIQUE
+/// violation escape as a 500 that leaks SQL text.
+class UsernameTaken implements Exception {
+  @override
+  String toString() => 'username is taken';
+}
+
 class AuthResult {
   const AuthResult({
     required this.accessJwt,
@@ -86,22 +94,37 @@ class Auth {
       throw ArgumentError('username required; password of at least 8 chars');
     }
     if (!registrationOpen) throw RegistrationClosed();
+    // Reject a taken name before hashing, so a UNIQUE violation cannot
+    // escape as a 500 leaking SQL. Registration is inherently an
+    // enumeration surface (the user must be told a name is free), so this
+    // adds no oracle login does not already have to defend against.
+    if (_store.userByName(name) != null) throw UsernameTaken();
     final role = _store.userCount() == 0 ? 'admin' : 'member';
     final id = _store.insertUser(name, await _hashPassword(password), role);
     return _issue(id, role);
   }
 
-  /// Null on any failure, with no unknown-user/wrong-password distinction —
-  /// and the hash runs on both branches so timing stays flat.
+  /// Null on any failure, with no unknown-user/wrong-password distinction.
+  /// Both branches run exactly one Argon2id verification — the unknown-user
+  /// branch against a cached dummy hash — so an attacker cannot time
+  /// `/api/auth/login` to learn which usernames exist. (Computing the dummy
+  /// hash fresh each call would itself be a second KDF on that branch, the
+  /// very oracle this closes.)
   Future<AuthResult?> login(String username, String password) async {
     final user = _store.userByName(username.trim().toLowerCase());
-    final stored =
-        user?.passwordHash ??
-        await _hashPassword('a-dummy-password-hashed-for-timing');
+    final stored = user?.passwordHash ?? await _dummyHash();
     final ok = await _verifyPassword(password, stored);
     if (user == null || !ok) return null;
     return _issue(user.id, user.role);
   }
+
+  Future<String>? _dummyHashFuture;
+
+  /// A well-formed Argon2id hash of a fixed password, computed once and
+  /// reused, so the unknown-user login branch costs exactly one
+  /// verification and no extra derivation.
+  Future<String> _dummyHash() =>
+      _dummyHashFuture ??= _hashPassword('a-dummy-password-hashed-for-timing');
 
   AuthResult? refresh(String presentedRefreshToken) {
     final hash = hashApiKey(presentedRefreshToken);

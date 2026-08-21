@@ -27,13 +27,24 @@ Future<ServerKeys> loadOrCreateServerKeys(String path) async {
   } else {
     final rng = Random.secure();
     bytes = List<int>.generate(64, (_) => rng.nextInt(256));
-    await file.writeAsBytes(bytes, flush: true);
-    // 0600 before anything else can open it. dart:io has no chmod; the
-    // platform tool is the stdlib-blessed route, and Windows ACLs already
-    // default to per-user profile directories.
+    // Create the file empty, tighten it to 0600, and only then write the
+    // key bytes — so the secret material never exists on disk at the
+    // process umask (typically 0644). dart:io has no chmod, and Windows
+    // ACLs already default to per-user profile directories, so the mode
+    // step is POSIX-only; there, a chmod that does not succeed is fatal
+    // rather than leaving a world-readable key.
+    await file.writeAsBytes(const [], flush: true);
     if (!Platform.isWindows) {
-      await Process.run('chmod', ['600', path]);
+      final chmod = await Process.run('chmod', ['600', path]);
+      if (chmod.exitCode != 0) {
+        await file.delete();
+        throw StateError(
+          'could not restrict $path to 0600 (chmod exit ${chmod.exitCode}): '
+          '${chmod.stderr}',
+        );
+      }
     }
+    await file.writeAsBytes(bytes, flush: true);
   }
   return ServerKeys(aesKey: bytes.sublist(0, 32), jwtKey: bytes.sublist(32));
 }

@@ -48,6 +48,16 @@ class _AppShellState extends State<AppShell> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(parts.join(' · '))));
+    } catch (_) {
+      // The web refresh reaches the server and can fail; a stopped spinner
+      // with no word is indistinguishable from success, so say so.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Refresh failed — could not reach the server.'),
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _refreshing = false);
     }

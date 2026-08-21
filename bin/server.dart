@@ -124,6 +124,19 @@ Future<void> main(List<String> args) async {
     onlyWatchId: watchId,
   );
 
+  // A hostname does not parse as an InternetAddress, and passing null would
+  // silently bind every interface — the opposite of what someone typing
+  // `--bind localhost` to lock down the server intends. Fail loudly instead.
+  final bindAddress = InternetAddress.tryParse(bindText);
+  if (bindAddress == null) {
+    stderr.writeln(
+      '--bind must be an IP address, not a hostname (got "$bindText"). '
+      'Use 127.0.0.1 for loopback or 0.0.0.0 for all interfaces.',
+    );
+    store.close();
+    exit(64);
+  }
+
   final server = AppServer(
     store: store,
     auth: auth,
@@ -136,7 +149,7 @@ Future<void> main(List<String> args) async {
     ),
     webRoot: webRoot,
     requestedPort: port,
-    bindAddress: InternetAddress.tryParse(bindText),
+    bindAddress: bindAddress,
   );
 
   final bound = await server.start();
@@ -154,6 +167,12 @@ Future<void> main(List<String> args) async {
 }
 
 String _promptPassword() {
+  // echoMode throws when stdin is not a terminal (a pipe or a file), which
+  // is exactly the documented `echo pw | ... --add-user` and CI path — so
+  // only toggle echo when there is a terminal to toggle.
+  if (!stdin.hasTerminal) {
+    return stdin.readLineSync() ?? '';
+  }
   stdout.write('password: ');
   final hadEcho = stdin.echoMode;
   stdin.echoMode = false;

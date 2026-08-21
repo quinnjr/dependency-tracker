@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import 'package:sqlite3/common.dart' show SqliteException;
 
 import '../api_keys.dart';
 import '../mcp/transport.dart';
@@ -205,6 +206,7 @@ class AppServer {
         );
 
       case ('POST', ['scan']):
+        if (!_requireAdmin(claims, response)) return;
         final result = await _scan();
         await _mutated(
           response,
@@ -218,6 +220,10 @@ class AppServer {
         );
 
       case ('POST', ['scan-roots']):
+        // Scan roots are server filesystem paths and scanning walks them —
+        // arbitrary-path filesystem access is an admin power, not a
+        // member's shared-watchlist power.
+        if (!_requireAdmin(claims, response)) return;
         final path = (await _body(request))['path'];
         if (path is! String || path.trim().isEmpty) {
           await _badRequest(response, 'path is required');
@@ -227,6 +233,7 @@ class AppServer {
         await _mutated(response);
 
       case ('DELETE', ['scan-roots']):
+        if (!_requireAdmin(claims, response)) return;
         final path = (await _body(request))['path'];
         if (path is! String) {
           await _badRequest(response, 'path is required');
@@ -236,6 +243,8 @@ class AppServer {
         await _mutated(response);
 
       case ('PUT', ['secrets', 'github-token']):
+        // The GitHub token is shared org-wide; only an admin replaces it.
+        if (!_requireAdmin(claims, response)) return;
         final token = (await _body(request))['token'];
         try {
           await secrets.setGithubToken(token is String ? token : null);
@@ -246,7 +255,10 @@ class AppServer {
         response.statusCode = HttpStatus.noContent;
         await response.close();
 
+      // MCP keys are persistent, server-wide agent credentials; managing
+      // them is an admin power.
       case ('GET', ['mcp-keys']):
+        if (!_requireAdmin(claims, response)) return;
         await _json(response, HttpStatus.ok, {
           'keys': [
             for (final k in store.apiKeys())
@@ -260,12 +272,23 @@ class AppServer {
         });
 
       case ('POST', ['mcp-keys']):
+        if (!_requireAdmin(claims, response)) return;
         final name = (await _body(request))['name'];
         if (name is! String || name.trim().isEmpty) {
           await _badRequest(response, 'name is required');
           return;
         }
-        final minted = mintApiKey(store, name.trim());
+        final MintedKey minted;
+        try {
+          minted = mintApiKey(store, name.trim());
+        } on SqliteException {
+          // A duplicate name violates UNIQUE(api_key.name); answer a clean
+          // 409 rather than letting SQL text escape through the 500 path.
+          await _json(response, HttpStatus.conflict, {
+            'error': 'a key named "${name.trim()}" already exists',
+          });
+          return;
+        }
         // The one time the key crosses the wire; only its hash survives
         // server-side, so this response is the caller's only copy.
         await _json(response, HttpStatus.ok, {
@@ -275,6 +298,7 @@ class AppServer {
         });
 
       case ('DELETE', ['mcp-keys', final idText]):
+        if (!_requireAdmin(claims, response)) return;
         final id = int.tryParse(idText);
         if (id == null) {
           await _notFound(response);
@@ -287,6 +311,13 @@ class AppServer {
       default:
         await _notFound(response);
     }
+  }
+
+  /// Answers 403 and returns false unless [claims] carries the admin role.
+  bool _requireAdmin(Map<String, Object?> claims, HttpResponse response) {
+    if (claims['role'] == 'admin') return true;
+    _json(response, HttpStatus.forbidden, {'error': 'admin only'});
+    return false;
   }
 
   Future<void> _auth(
@@ -317,10 +348,14 @@ class AppServer {
             '${body['username'] ?? ''}',
             '${body['password'] ?? ''}',
           );
-          await _session(response, result!);
+          await _session(request, response, result!);
         } on RegistrationClosed {
           await _json(response, HttpStatus.forbidden, {
             'error': 'registration is closed',
+          });
+        } on UsernameTaken {
+          await _json(response, HttpStatus.conflict, {
+            'error': 'that username is taken',
           });
         } on ArgumentError catch (e) {
           await _badRequest(response, e.message.toString());
@@ -338,7 +373,7 @@ class AppServer {
           });
           return;
         }
-        await _session(response, result);
+        await _session(request, response, result);
 
       case ['refresh']:
         final presented = _refreshCookie(request);
@@ -349,7 +384,7 @@ class AppServer {
           });
           return;
         }
-        await _session(response, result);
+        await _session(request, response, result);
 
       case ['logout']:
         final presented = _refreshCookie(request);
@@ -388,11 +423,16 @@ class AppServer {
 
   /// A successful register/login/refresh: access JWT in the body, rotated
   /// refresh token in the cookie.
-  Future<void> _session(HttpResponse response, AuthResult result) async {
+  Future<void> _session(
+    HttpRequest request,
+    HttpResponse response,
+    AuthResult result,
+  ) async {
     response.headers.add(
       'set-cookie',
-      '$refreshCookieName=${result.refreshToken}; Max-Age=${refreshTokenTtl.inSeconds}; '
-          'Path=/api/auth; HttpOnly; SameSite=Strict',
+      '$refreshCookieName=${result.refreshToken}; '
+          'Max-Age=${refreshTokenTtl.inSeconds}; Path=/api/auth; HttpOnly; '
+          'SameSite=Strict${_secureAttr(request)}',
     );
     await _json(response, HttpStatus.ok, {
       'accessToken': result.accessJwt,
@@ -403,7 +443,24 @@ class AppServer {
 
   String _clearCookie(HttpRequest request) =>
       '$refreshCookieName=; Max-Age=0; Path=/api/auth; HttpOnly; '
-      'SameSite=Strict';
+      'SameSite=Strict${_secureAttr(request)}';
+
+  /// `; Secure` whenever the request reached us over TLS — directly, or via
+  /// a terminating proxy that set `X-Forwarded-Proto: https`. Kept off for
+  /// plain http so a localhost/LAN deployment without TLS still works,
+  /// while any real https origin binds the 30-day token to encrypted
+  /// transport.
+  String _secureAttr(HttpRequest request) {
+    final forwarded = request.headers
+        .value('x-forwarded-proto')
+        ?.split(',')
+        .first
+        .trim()
+        .toLowerCase();
+    final https =
+        request.requestedUri.scheme == 'https' || forwarded == 'https';
+    return https ? '; Secure' : '';
+  }
 
   String? _refreshCookie(HttpRequest request) {
     for (final cookie in request.cookies) {

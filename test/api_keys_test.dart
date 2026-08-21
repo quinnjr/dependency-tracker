@@ -1,4 +1,5 @@
 import 'package:deptracker/api_keys.dart';
+import 'package:deptracker/redact.dart';
 import 'package:deptracker/store.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -41,5 +42,11 @@ void main() {
   test('duplicate names are refused', () {
     mintApiKey(store, 'a');
     expect(() => mintApiKey(store, 'a'), throwsA(anything));
+  });
+
+  test('a minted key is registered for redaction, like the old token was', () {
+    addTearDown(clearSecrets);
+    final minted = mintApiKey(store, 'a');
+    expect(redact('bearer ${minted.key} failed'), 'bearer «redacted» failed');
   });
 }

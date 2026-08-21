@@ -475,6 +475,35 @@ void main() {
       expect(store.revision(), r1 + 1);
       expect(store.exportSnapshot()['revision'], r1 + 1);
     });
+
+    test(
+      'importSnapshot drops a snapshot older than the mirror already holds',
+      () {
+        // The mirror is at revision 5 with one watch...
+        final ahead = Store.openInMemory();
+        addTearDown(ahead.close);
+        ahead.upsertWatch(WatchKind.pub, 'current');
+        while (ahead.revision() < 5) {
+          ahead.bumpRevision();
+        }
+
+        // ...and a stale revision-3 snapshot (empty) arrives out of order.
+        final stale = {
+          'revision': 3,
+          'watch': <Map<String, Object?>>[],
+          'usage': <Map<String, Object?>>[],
+          'release': <Map<String, Object?>>[],
+          'scan_root': <Map<String, Object?>>[],
+        };
+        expect(ahead.importSnapshot(stale), isFalse);
+        expect(ahead.watches(), hasLength(1), reason: 'not rolled backward');
+
+        // A newer snapshot still applies.
+        final fresh = {...stale, 'revision': 6};
+        expect(ahead.importSnapshot(fresh), isTrue);
+        expect(ahead.watches(), isEmpty);
+      },
+    );
   });
 
   test('mutations notify listeners', () {

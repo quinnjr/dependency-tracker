@@ -85,12 +85,22 @@ class _SettingsPaneState extends State<SettingsPane> {
   @override
   void initState() {
     super.initState();
+    // The pane is shown in a dialog, outside AppShell's NotifierBuilder, so
+    // it must subscribe to the store itself — otherwise a scan-root change
+    // that lands asynchronously (the web build POSTs, then applies the
+    // returned snapshot to the mirror) would not repaint the list.
+    widget.store.addListener(_onStoreChanged);
     _loadPatPresence();
     _loadKeys();
   }
 
+  void _onStoreChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    widget.store.removeListener(_onStoreChanged);
     _patController.dispose();
     _keyNameController.dispose();
     _rootPathController.dispose();
@@ -101,8 +111,10 @@ class _SettingsPaneState extends State<SettingsPane> {
     try {
       final token = await widget.secrets.githubToken();
       if (mounted) setState(() => _hasStoredPat = token != null);
-    } on KeyringUnavailable {
-      // Nothing to report here: the MCP error banner already explains it.
+    } on SecretStoreUnavailable {
+      // Nothing to report here: on desktop the MCP error banner already
+      // explains a missing keyring, and on web the REST backend already
+      // degrades a failed probe to "not set".
     }
   }
 
@@ -140,6 +152,10 @@ class _SettingsPaneState extends State<SettingsPane> {
             '${r.projectsScanned} projects, ${r.depsFound} dependencies'
             '${r.errors.isEmpty ? '' : ', ${r.errors.length} problems'}',
       );
+    } catch (_) {
+      // On web the scan runs on the server and can fail; report it rather
+      // than leaving the button spinning silently.
+      if (mounted) setState(() => _scanSummary = 'Scan failed.');
     } finally {
       if (mounted) setState(() => _scanning = false);
     }
@@ -168,7 +184,9 @@ class _SettingsPaneState extends State<SettingsPane> {
         _patStatus = e.message.toString();
         _patStatusIsError = true;
       });
-    } on KeyringUnavailable catch (e) {
+    } on SecretStoreUnavailable catch (e) {
+      // Covers both a missing keyring (desktop) and an unreachable server
+      // (web); each type renders its own message, redacted for safety.
       if (!mounted) return;
       setState(() {
         _patStatus = redact(e.toString());
@@ -301,6 +319,12 @@ class _SettingsPaneState extends State<SettingsPane> {
     final roots = widget.store.scanRoots();
     final body = TextStyle(fontSize: 13, color: t.slate, height: 1.5);
     final auth = widget.auth;
+    // Desktop has one owner and no roles, so everything shows. On web the
+    // scanner, the shared GitHub token, and the MCP keys are admin-only on
+    // the server (they touch the server filesystem or server-wide
+    // credentials), so hide those controls from members rather than show
+    // buttons that 403.
+    final isAdmin = auth == null || auth.role == 'admin';
 
     return ListView(
       padding: EdgeInsets.zero,
@@ -311,14 +335,20 @@ class _SettingsPaneState extends State<SettingsPane> {
             first: true,
             children: [
               Text(
-                'This browser is a client of the deptracker server, which '
-                'owns the watch database, does all the fetching, and scans '
-                'its own filesystem. Scan roots below are server paths.',
+                isAdmin
+                    ? 'This browser is a client of the deptracker server, '
+                          'which owns the watch database, does all the '
+                          'fetching, and scans its own filesystem. Scan roots '
+                          'below are server paths.'
+                    : 'This browser is a client of the deptracker server, '
+                          'which owns the watch database and does all the '
+                          'fetching. Scanning, the shared GitHub token, and '
+                          'agent keys are managed by an admin.',
                 style: body,
               ),
             ],
           ),
-        if (widget.onScan != null)
+        if (widget.onScan != null && isAdmin)
           _SettingsSection(
             label: 'Scanned folders',
             first: !widget.isWeb,
@@ -408,106 +438,112 @@ class _SettingsPaneState extends State<SettingsPane> {
             ],
           ),
 
-        _SettingsSection(
-          label: 'GitHub token',
-          children: [
-            Text(
-              widget.isWeb
-                  ? 'Optional. A token gets richer Markdown notes and '
-                        'faster lookups. Stored on the server, encrypted '
-                        'at rest beside its key file — never in this '
-                        'browser.'
-                  : 'Optional. Without one, release notes still come from '
-                        'public Atom feeds. A token gets richer Markdown '
-                        'notes and faster lookups. Stored in the host '
-                        'keyring, never on disk.',
-              style: body,
-            ),
-            const SizedBox(height: 9),
-            if (_hasStoredPat)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Text(
-                  'A token is set. Save a new one to replace it.',
-                  style: TextStyle(fontSize: 12.5, color: t.current),
-                ),
+        if (isAdmin)
+          _SettingsSection(
+            label: 'GitHub token',
+            children: [
+              Text(
+                widget.isWeb
+                    ? 'Optional. A token gets richer Markdown notes and '
+                          'faster lookups. Stored on the server, encrypted '
+                          'at rest beside its key file — never in this '
+                          'browser.'
+                    : 'Optional. Without one, release notes still come from '
+                          'public Atom feeds. A token gets richer Markdown '
+                          'notes and faster lookups. Stored in the host '
+                          'keyring, never on disk.',
+                style: body,
               ),
-            TextField(
-              key: const Key('pat-field'),
-              controller: _patController,
-              // Never pre-populated with the stored value: a stored secret
-              // should not be readable by anyone who opens this dialog.
-              obscureText: true,
-              style: monoStyle(color: t.ink, size: 13),
-              decoration: const InputDecoration(
-                labelText: 'Personal access token',
-                hintText: 'Paste your token here',
-              ),
-            ),
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton(
-                onPressed: _savePat,
-                child: const Text('Save token'),
-              ),
-            ),
-            if (_patStatus != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  _patStatus!,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    height: 1.4,
-                    color: _patStatusIsError ? t.behind : t.current,
+              const SizedBox(height: 9),
+              if (_hasStoredPat)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    'A token is set. Save a new one to replace it.',
+                    style: TextStyle(fontSize: 12.5, color: t.current),
                   ),
                 ),
+              TextField(
+                key: const Key('pat-field'),
+                controller: _patController,
+                // Never pre-populated with the stored value: a stored secret
+                // should not be readable by anyone who opens this dialog.
+                obscureText: true,
+                style: monoStyle(color: t.ink, size: 13),
+                decoration: const InputDecoration(
+                  labelText: 'Personal access token',
+                  hintText: 'Paste your token here',
+                ),
               ),
-          ],
-        ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton(
+                  onPressed: _savePat,
+                  child: const Text('Save token'),
+                ),
+              ),
+              if (_patStatus != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    _patStatus!,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      height: 1.4,
+                      color: _patStatusIsError ? t.behind : t.current,
+                    ),
+                  ),
+                ),
+            ],
+          ),
 
-        _SettingsSection(
-          label: 'MCP server',
-          children: [
-            if (widget.mcpError != null)
-              Text(
-                'The MCP server is not running: '
-                '${redact(widget.mcpError.toString())}',
-                style: TextStyle(fontSize: 12.5, color: t.behind, height: 1.4),
-              )
-            else if (widget.isWeb) ...[
-              Text(
-                'Agents connect to $mcpPath on this server.',
-                style: monoStyle(color: t.ink, size: 12.5),
-              ),
-              const SizedBox(height: 9),
-              Text(
-                'Agents authenticate with an API key. Each key is shown '
-                'once, when it is created — only a hash is kept.',
-                style: body,
-              ),
-              const SizedBox(height: 8),
-              ..._keyManager(t, body),
-            ] else if (widget.mcpPort != null) ...[
-              Text(
-                'http://127.0.0.1:${widget.mcpPort}$mcpPath',
-                style: monoStyle(color: t.ink, size: 12.5),
-              ),
-              const SizedBox(height: 4),
-              Text('Loopback only.', style: body),
-              const SizedBox(height: 9),
-              Text(
-                'Agents authenticate with an API key. Each key is shown '
-                'once, when it is created — only a hash is kept.',
-                style: body,
-              ),
-              const SizedBox(height: 8),
-              ..._keyManager(t, body),
-            ] else
-              Text('Starting…', style: body),
-          ],
-        ),
+        if (isAdmin)
+          _SettingsSection(
+            label: 'MCP server',
+            children: [
+              if (widget.mcpError != null)
+                Text(
+                  'The MCP server is not running: '
+                  '${redact(widget.mcpError.toString())}',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: t.behind,
+                    height: 1.4,
+                  ),
+                )
+              else if (widget.isWeb) ...[
+                Text(
+                  'Agents connect to $mcpPath on this server.',
+                  style: monoStyle(color: t.ink, size: 12.5),
+                ),
+                const SizedBox(height: 9),
+                Text(
+                  'Agents authenticate with an API key. Each key is shown '
+                  'once, when it is created — only a hash is kept.',
+                  style: body,
+                ),
+                const SizedBox(height: 8),
+                ..._keyManager(t, body),
+              ] else if (widget.mcpPort != null) ...[
+                Text(
+                  'http://127.0.0.1:${widget.mcpPort}$mcpPath',
+                  style: monoStyle(color: t.ink, size: 12.5),
+                ),
+                const SizedBox(height: 4),
+                Text('Loopback only.', style: body),
+                const SizedBox(height: 9),
+                Text(
+                  'Agents authenticate with an API key. Each key is shown '
+                  'once, when it is created — only a hash is kept.',
+                  style: body,
+                ),
+                const SizedBox(height: 8),
+                ..._keyManager(t, body),
+              ] else
+                Text('Starting…', style: body),
+            ],
+          ),
 
         if (auth != null)
           _SettingsSection(

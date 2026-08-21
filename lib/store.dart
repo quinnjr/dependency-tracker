@@ -923,7 +923,15 @@ class Store extends StoreListenable implements EtagCache {
   /// come from this app's own [exportSnapshot] over the same schema, not
   /// from attacker input, and the mirror this feeds is an in-memory,
   /// disposable database.
-  void importSnapshot(Map<String, Object?> snapshot) {
+  ///
+  /// Server revisions only ever increase, so a snapshot whose revision is
+  /// older than what the mirror already holds is a response that overtook a
+  /// newer one in flight — applying it would roll the user's own change
+  /// backward. Such a snapshot is dropped; the newer state already applied
+  /// stands. Returns whether the snapshot was applied.
+  bool importSnapshot(Map<String, Object?> snapshot) {
+    final incoming = snapshot['revision'];
+    if (incoming is int && incoming < revision()) return false;
     runInTransaction(() {
       // Children before parents, so ON DELETE CASCADE never fires against
       // rows the snapshot is about to re-create.
@@ -958,6 +966,7 @@ class Store extends StoreListenable implements EtagCache {
       }
     });
     _deferOrNotify();
+    return true;
   }
 
   /// Monotonic change counter for the snapshot protocol. Bumped by the

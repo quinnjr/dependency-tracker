@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 
+import 'redact.dart';
 import 'store.dart';
 
 /// Named, revocable MCP API keys. The key itself is returned exactly once at
@@ -26,6 +27,11 @@ MintedKey mintApiKey(Store store, String name) {
   final rng = Random.secure();
   final key =
       'dtk_${base64Url.encode(List<int>.generate(32, (_) => rng.nextInt(256))).replaceAll('=', '')}';
+  // The plaintext key exists only here and in the one response that returns
+  // it; register it so it is scrubbed from any error text it might reach
+  // (the settings pane, the MCP transport's 500 path, the gateway's) —
+  // the redaction the old single-token model gave the MCP credential.
+  registerSecret(key);
   final id = store.insertApiKey(name, hashApiKey(key));
   return MintedKey(id: id, name: name, key: key);
 }

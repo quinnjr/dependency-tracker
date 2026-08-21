@@ -254,6 +254,41 @@ void main() {
     });
 
     test(
+      'register sets Secure only over TLS (via x-forwarded-proto)',
+      () async {
+        final plain = await send(
+          'POST',
+          '/api/auth/register',
+          body: {'username': 'plain', 'password': 'a-strong-password'},
+        );
+        expect(plain.headers['set-cookie'], isNot(contains('Secure')));
+
+        final tls = await send(
+          'POST',
+          '/api/auth/login',
+          body: {'username': 'plain', 'password': 'a-strong-password'},
+          headers: {'x-forwarded-proto': 'https'},
+        );
+        expect(tls.headers['set-cookie'], contains('Secure'));
+      },
+    );
+
+    test(
+      'a duplicate username is a clean 409, not a 500 leaking SQL',
+      () async {
+        await register('owner');
+        final dup = await send(
+          'POST',
+          '/api/auth/register',
+          body: {'username': 'owner', 'password': 'another-password'},
+        );
+        expect(dup.statusCode, 409);
+        expect(dup.body, isNot(contains('UNIQUE')));
+        expect(dup.body, isNot(contains('constraint')));
+      },
+    );
+
+    test(
       'the registration toggle is admin-only and closes registration',
       () async {
         final admin = await register('owner');
@@ -421,6 +456,53 @@ void main() {
         jwt: session.jwt,
       );
       expect(put.statusCode, 400);
+    });
+
+    test('members are 403 on the admin-only surfaces', () async {
+      await register('owner'); // first account is admin
+      final member = await register('teammate');
+      expect(member.role, 'member');
+
+      Future<int> code(String method, String path, [Object? body]) async =>
+          (await send(method, path, body: body, jwt: member.jwt)).statusCode;
+
+      // Server-filesystem and server-wide-credential routes: admin only.
+      expect(await code('POST', '/api/scan-roots', {'path': '/etc'}), 403);
+      expect(await code('DELETE', '/api/scan-roots', {'path': '/etc'}), 403);
+      expect(await code('POST', '/api/scan'), 403);
+      expect(
+        await code('PUT', '/api/secrets/github-token', {'token': 'x' * 20}),
+        403,
+      );
+      expect(await code('GET', '/api/mcp-keys'), 403);
+      expect(await code('POST', '/api/mcp-keys', {'name': 'agent'}), 403);
+
+      // But the shared watchlist stays a member power.
+      final created = await send(
+        'POST',
+        '/api/watches',
+        body: {'kind': 'pub', 'name': 'http'},
+        jwt: member.jwt,
+      );
+      expect(created.statusCode, 200);
+    });
+
+    test('a duplicate mcp-key name is a clean 409, not a 500', () async {
+      final session = await register('owner');
+      await send(
+        'POST',
+        '/api/mcp-keys',
+        body: {'name': 'agent'},
+        jwt: session.jwt,
+      );
+      final dup = await send(
+        'POST',
+        '/api/mcp-keys',
+        body: {'name': 'agent'},
+        jwt: session.jwt,
+      );
+      expect(dup.statusCode, 409);
+      expect(dup.body, isNot(contains('UNIQUE')));
     });
   });
 

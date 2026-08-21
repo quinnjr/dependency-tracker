@@ -56,27 +56,36 @@ class SyncClient implements AuthController {
   /// round trip, not a password prompt.
   Future<void> initialize() async {
     await refreshStatus();
-    final r = await _http.post(base.resolve('api/auth/refresh'));
-    if (r.statusCode == 200) {
-      _adoptSession(jsonDecode(r.body) as Map);
+    // A cookie-backed resume, through the same shared refresh path; any
+    // failure just leaves the login screen up rather than propagating out
+    // of bootstrap into a blank page.
+    if (await _refreshSession()) {
       await hydrate();
     }
     changes.notifyListeners();
   }
 
   Future<void> refreshStatus() async {
-    final r = await _http.get(base.resolve('api/status'));
-    if (r.statusCode == 200) {
-      final status = jsonDecode(r.body) as Map;
+    final status = await _status();
+    if (status != null) {
       _zeroUsers = status['users'] == 0;
       _registrationOpen = status['registrationOpen'] == true;
     }
   }
 
-  Future<bool> githubTokenSet() async {
-    final r = await _http.get(base.resolve('api/status'));
-    return r.statusCode == 200 &&
-        (jsonDecode(r.body) as Map)['githubTokenSet'] == true;
+  Future<bool> githubTokenSet() async =>
+      (await _status())?['githubTokenSet'] == true;
+
+  /// `/api/status`, or null if unreachable or not JSON — the SPA fallback
+  /// answers an unknown deep path with index.html (HTML, 200), so a blind
+  /// jsonDecode here would throw and, before runApp, blank the page.
+  Future<Map<dynamic, dynamic>?> _status() async {
+    try {
+      final r = await _http.get(base.resolve('api/status'));
+      return r.statusCode == 200 ? _tryJson(r.body) : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   @override
@@ -233,10 +242,13 @@ class SyncClient implements AuthController {
     );
   }
 
+  /// Fire-and-forget mutation: apply the snapshot on success, record the
+  /// failure on the banner otherwise. `_send` (orThrow:false) never throws —
+  /// it maps every failure, transport errors included, to a null result and
+  /// a `syncError` — so the button always resolves to either a mirror
+  /// update or a visible message, never a dropped async error.
   void _mutate(String method, String path, {Object? body}) {
-    _send(method, path, body: body).then((response) {
-      _applySnapshot(response);
-    });
+    _send(method, path, body: body).then(_applySnapshot);
   }
 
   void _applySnapshot(Map<String, Object?>? body) {
@@ -246,10 +258,35 @@ class SyncClient implements AuthController {
     }
   }
 
-  /// One request with the standing JWT; on a 401, one silent refresh and
-  /// one retry. Returns the decoded JSON body (empty map for 204), or null
-  /// after recording the failure in [syncError] — unless [orThrow], for
-  /// callers (refresh, scan) whose UI already renders errors itself.
+  /// A single in-flight refresh shared by every caller that races an
+  /// access-token expiry: the refresh token is single-use and rotates, so
+  /// two concurrent refreshes would spend it twice and log the loser out.
+  /// Memoized while running, cleared when done.
+  Future<bool>? _refreshing;
+
+  Future<bool> _refreshSession() {
+    return _refreshing ??= () async {
+      try {
+        final r = await _http.post(base.resolve('api/auth/refresh'));
+        if (r.statusCode == 200) {
+          _adoptSession(jsonDecode(r.body) as Map);
+          return true;
+        }
+        return false;
+      } catch (_) {
+        return false;
+      } finally {
+        _refreshing = null;
+      }
+    }();
+  }
+
+  /// One request with the standing JWT; on a 401, one shared silent refresh
+  /// and one retry. Returns the decoded JSON body (empty map for 204), or
+  /// null after recording the failure in [syncError] — unless [orThrow],
+  /// for callers (refresh, scan) whose UI renders errors itself. With
+  /// orThrow false this never throws: a transport failure is a null result
+  /// and a banner, not an escaping async error.
   Future<Map<String, Object?>?> _send(
     String method,
     String path, {
@@ -257,16 +294,23 @@ class SyncClient implements AuthController {
     bool orThrow = false,
     bool retried = false,
   }) async {
-    final request = http.Request(method, base.resolve(path));
-    request.headers['content-type'] = 'application/json';
-    if (_jwt != null) request.headers['authorization'] = 'Bearer $_jwt';
-    if (body != null) request.body = jsonEncode(body);
-    final r = await http.Response.fromStream(await _http.send(request));
+    final http.Response r;
+    try {
+      final request = http.Request(method, base.resolve(path));
+      request.headers['content-type'] = 'application/json';
+      if (_jwt != null) request.headers['authorization'] = 'Bearer $_jwt';
+      if (body != null) request.body = jsonEncode(body);
+      r = await http.Response.fromStream(await _http.send(request));
+    } catch (e) {
+      if (orThrow) rethrow;
+      syncError.value = 'could not reach the server';
+      return null;
+    }
 
     if (r.statusCode == 401 && !retried) {
-      final refreshed = await _http.post(base.resolve('api/auth/refresh'));
-      if (refreshed.statusCode == 200) {
-        _adoptSession(jsonDecode(refreshed.body) as Map);
+      // Only the first racing caller actually refreshes; the rest await the
+      // same Future, so the rotating token is spent exactly once.
+      if (await _refreshSession()) {
         return _send(method, path, body: body, orThrow: orThrow, retried: true);
       }
       // The session is genuinely over; the gate widget listens for this.
