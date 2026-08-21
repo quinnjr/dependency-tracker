@@ -149,7 +149,7 @@ class McpTransport {
       requestedPort,
     );
     _http = server;
-    server.listen(_handle, onError: (_) {});
+    server.listen(handleRequest, onError: (_) {});
 
     // SSE keep-alives are the transport's job now: mcp.SseTransport sends a
     // heartbeat on its own schedule, so the timer that used to live here would
@@ -170,7 +170,12 @@ class McpTransport {
     _http = null;
   }
 
-  Future<void> _handle(HttpRequest request) async {
+  /// The full MCP request pipeline (origin check, API-key auth, dispatch).
+  /// Public so a host serving several mounts from one listener — the web
+  /// gateway's AppServer — can forward `/mcp` traffic here without this
+  /// transport binding its own socket; the desktop app still calls [start]
+  /// and lets the transport listen for itself.
+  Future<void> handleRequest(HttpRequest request) async {
     final response = request.response;
     try {
       if (!isAllowedOrigin(request.headers.value('origin'))) {
