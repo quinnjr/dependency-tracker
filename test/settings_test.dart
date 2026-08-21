@@ -44,20 +44,28 @@ late Secrets secrets;
 late int scans;
 String? pick;
 
-Widget pane({int? mcpPort = 51234, Object? mcpError}) => MaterialApp(
-  home: Scaffold(
-    body: SettingsPane(
-      store: store,
-      secrets: secrets,
-      pickDirectory: () async => pick,
-      onScan: () async {
-        scans++;
-        return const ScanResult(projectsScanned: 2, depsFound: 9, errors: []);
-      },
-      mcpPort: mcpPort,
-      mcpError: mcpError,
-    ),
-  ),
+Widget pane({int? mcpPort = 51234, Object? mcpError, bool isWeb = false}) =>
+    MaterialApp(
+      home: Scaffold(
+        body: SettingsPane(
+          store: store,
+          secrets: secrets,
+          pickDirectory: isWeb ? null : () async => pick,
+          onScan: isWeb
+              ? null
+              : () async {
+                  scans++;
+                  return const ScanResult(
+                    projectsScanned: 2,
+                    depsFound: 9,
+                    errors: [],
+                  );
+                },
+          mcpPort: mcpPort,
+          mcpError: mcpError,
+          isWeb: isWeb,
+        ),
+      ),
 );
 
 /// Scrolls [f] into view, then taps it.
@@ -310,5 +318,28 @@ void settingsEdgeTests() {
     await tester.pumpAndSettle();
 
     expect(find.text('Starting…'), findsOneWidget);
+  });
+
+  testWidgets('the web build hides scanning and MCP and says why', (
+    tester,
+  ) async {
+    await tester.pumpWidget(pane(isWeb: true, mcpPort: null));
+    await tester.pumpAndSettle();
+
+    expect(find.text('SCANNED FOLDERS'), findsNothing);
+    expect(find.text('MCP SERVER'), findsNothing);
+    expect(find.textContaining('browser build'), findsOneWidget);
+    expect(find.textContaining('for this tab only'), findsOneWidget);
+  });
+
+  testWidgets('the desktop build still shows scanning and MCP', (
+    tester,
+  ) async {
+    await tester.pumpWidget(pane());
+    await tester.pumpAndSettle();
+
+    expect(find.text('SCANNED FOLDERS'), findsOneWidget);
+    expect(find.text('MCP SERVER'), findsOneWidget);
+    expect(find.textContaining('browser build'), findsNothing);
   });
 }
