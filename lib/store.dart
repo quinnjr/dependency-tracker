@@ -190,6 +190,18 @@ class Store extends ChangeNotifier implements EtagCache {
         nonce BLOB NOT NULL,
         ciphertext BLOB NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS user (
+        id INTEGER PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS refresh_token (
+        hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+        expires_at INTEGER NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS usage_by_project ON usage(project_path);
       CREATE INDEX IF NOT EXISTS release_by_watch ON release(watch_id);
     ''');
@@ -983,6 +995,72 @@ class Store extends ChangeNotifier implements EtagCache {
     ]);
     notifyListeners();
   }
+
+  // `user` and `refresh_token` are server bookkeeping like `secret` below:
+  // the desktop UI never renders accounts, so their mutators do not notify.
+  // Passwords arrive here already Argon2id-hashed and refresh tokens
+  // already SHA-256-hashed (lib/server/auth.dart) — the Store never sees
+  // either in the clear.
+
+  int insertUser(String username, String passwordHash, String role) {
+    final rows = _db.select(
+      'INSERT INTO user (username, password_hash, role, created_at) '
+      'VALUES (?, ?, ?, ?) RETURNING id',
+      [username, passwordHash, role, _epoch(DateTime.now())],
+    );
+    return rows.first['id'] as int;
+  }
+
+  ({int id, String passwordHash, String role})? userByName(String username) {
+    final rows = _db.select(
+      'SELECT id, password_hash, role FROM user WHERE username = ?',
+      [username],
+    );
+    if (rows.isEmpty) return null;
+    return (
+      id: rows.first['id'] as int,
+      passwordHash: rows.first['password_hash'] as String,
+      role: rows.first['role'] as String,
+    );
+  }
+
+  int userCount() =>
+      _db.select('SELECT COUNT(*) AS c FROM user').first['c'] as int;
+
+  String? userRoleById(int id) {
+    final rows = _db.select('SELECT role FROM user WHERE id = ?', [id]);
+    return rows.isEmpty ? null : rows.first['role'] as String;
+  }
+
+  void setUserPasswordHash(int id, String passwordHash) => _db.execute(
+    'UPDATE user SET password_hash = ? WHERE id = ?',
+    [passwordHash, id],
+  );
+
+  void insertRefreshToken(String hash, int userId, DateTime expires) =>
+      _db.execute(
+        'INSERT INTO refresh_token (hash, user_id, expires_at) '
+        'VALUES (?, ?, ?)',
+        [hash, userId, _epoch(expires)],
+      );
+
+  ({int userId, DateTime expiresAt})? refreshTokenByHash(String hash) {
+    final rows = _db.select(
+      'SELECT user_id, expires_at FROM refresh_token WHERE hash = ?',
+      [hash],
+    );
+    if (rows.isEmpty) return null;
+    return (
+      userId: rows.first['user_id'] as int,
+      expiresAt: DateTime.fromMillisecondsSinceEpoch(
+        (rows.first['expires_at'] as int) * 1000,
+        isUtc: true,
+      ),
+    );
+  }
+
+  void deleteRefreshToken(String hash) =>
+      _db.execute('DELETE FROM refresh_token WHERE hash = ?', [hash]);
 
   // `secret` follows the same exemption as `meta`/`http_cache`: server
   // bookkeeping the UI never renders, so its mutators do not notify. The
