@@ -399,6 +399,15 @@ void main() {
     expect(store.etagFor('https://x/y'), 'W/"def"');
   });
 
+  test('openAsync opens a database at a path, like open but awaitable', () async {
+    final dir = Directory.systemTemp.createTempSync('store_async');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final s = await Store.openAsync(p.join(dir.path, 'async.db'));
+    addTearDown(s.close);
+    final id = s.upsertWatch(WatchKind.pub, 'http');
+    expect(s.watchById(id), isNotNull);
+  });
+
   test('mutations notify listeners', () {
     var notified = 0;
     store.addListener(() => notified++);

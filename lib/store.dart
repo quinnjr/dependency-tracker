@@ -2,7 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:sqlite3/common.dart';
 
 import 'canonicalize.dart';
-import 'db/db_open_io.dart' if (dart.library.js_interop) 'db/db_open_io.dart';
+import 'db/db_open_io.dart' if (dart.library.js_interop) 'db/db_open_web.dart';
 import 'models.dart';
 import 'net.dart';
 import 'versions.dart';
@@ -100,6 +100,16 @@ class Store extends ChangeNotifier implements EtagCache {
 
   static Store openInMemory() {
     final store = Store._(openDatabaseInMemory());
+    store._migrate();
+    return store;
+  }
+
+  /// [open]'s awaitable twin, and the only opener the web build can use:
+  /// fetching sqlite3.wasm and attaching the IndexedDB VFS are async, so a
+  /// synchronous open cannot exist there. On the VM it opens the same
+  /// database [open] would.
+  static Future<Store> openAsync(String ref) async {
+    final store = Store._(await openDatabaseAsync(ref));
     store._migrate();
     return store;
   }
