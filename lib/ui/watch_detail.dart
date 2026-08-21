@@ -79,6 +79,9 @@ class WatchDetail extends StatelessWidget {
                 releaseVersions: [for (final r in releases) r.version],
                 resolvedPins: resolvedPins,
                 unresolvedPinCount: usages.length - resolvedPins.length,
+                // The same behind-count the list row shows, so the two never
+                // disagree when a pin falls off the axis.
+                behindBy: store.driftFor([id])[id]?.behindBy,
               ),
             ),
 

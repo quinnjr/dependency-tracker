@@ -85,6 +85,13 @@ class Store extends StoreListenable implements EtagCache {
   bool _closed = false;
   bool _inTransaction = false;
   bool _pendingNotify = false;
+  bool _pendingRevisionBump = false;
+
+  // True only while [importSnapshot] rewrites the mirror from a server
+  // snapshot: that path sets the revision from the snapshot itself, so its
+  // notification must not auto-advance the counter the way an ordinary
+  // server-side mutation does.
+  bool _importing = false;
 
   // Prepared once per Store and reused, because the scanner calls
   // [upsertWatch] once per parsed dependency inside its per-manifest
@@ -275,6 +282,7 @@ class Store extends StoreListenable implements EtagCache {
       // error nor strand _pendingNotify to fire on an unrelated later
       // transaction.
       _pendingNotify = false;
+      _pendingRevisionBump = false;
       _inTransaction = false;
       try {
         _db.execute('ROLLBACK');
@@ -290,6 +298,10 @@ class Store extends StoreListenable implements EtagCache {
     // taking the reentrant no-BEGIN path against a transaction that no
     // longer exists.
     _inTransaction = false;
+    if (_pendingRevisionBump) {
+      _pendingRevisionBump = false;
+      _advanceRevision();
+    }
     if (_pendingNotify) {
       _pendingNotify = false;
       notifyListeners();
@@ -300,11 +312,19 @@ class Store extends StoreListenable implements EtagCache {
   /// Notifies immediately when called outside any transaction (the common
   /// case), or defers to a single notification fired by the outermost
   /// [runInTransaction] call once it commits, when called from within one.
-  /// See [runInTransaction] for why this exists.
+  ///
+  /// Every UI-visible mutation also advances the snapshot [revision] here —
+  /// the single choke point both a REST handler and an MCP tool pass
+  /// through — so the server's `GET /api/snapshot` ETag changes no matter
+  /// which door made the change. The one exception is [importSnapshot],
+  /// which is the client applying the server's already-numbered snapshot;
+  /// it must not renumber it. See [runInTransaction] for why this exists.
   void _deferOrNotify() {
     if (_inTransaction) {
       _pendingNotify = true;
+      if (!_importing) _pendingRevisionBump = true;
     } else {
+      if (!_importing) _advanceRevision();
       notifyListeners();
     }
   }
@@ -932,6 +952,16 @@ class Store extends StoreListenable implements EtagCache {
   bool importSnapshot(Map<String, Object?> snapshot) {
     final incoming = snapshot['revision'];
     if (incoming is int && incoming < revision()) return false;
+    _importing = true;
+    try {
+      _importSnapshot(snapshot);
+    } finally {
+      _importing = false;
+    }
+    return true;
+  }
+
+  void _importSnapshot(Map<String, Object?> snapshot) {
     runInTransaction(() {
       // Children before parents, so ON DELETE CASCADE never fires against
       // rows the snapshot is about to re-create.
@@ -966,13 +996,15 @@ class Store extends StoreListenable implements EtagCache {
       }
     });
     _deferOrNotify();
-    return true;
   }
 
-  /// Monotonic change counter for the snapshot protocol. Bumped by the
-  /// server on every mutation; does not notify (the mutator that bumped it
-  /// already does).
-  int bumpRevision() {
+  /// Monotonic change counter for the snapshot protocol. Advanced
+  /// automatically by [_deferOrNotify] on every UI-visible server-side
+  /// mutation; this public form exists for callers and tests that want to
+  /// advance it explicitly. Does not notify.
+  int bumpRevision() => _advanceRevision();
+
+  int _advanceRevision() {
     final next = revision() + 1;
     _db.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
       'revision',

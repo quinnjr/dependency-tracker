@@ -483,9 +483,17 @@ class AppServer {
     if (origin == null) return true;
     final uri = Uri.tryParse(origin);
     final host = request.headers.value('host');
-    if (uri == null || host == null) return false;
-    final originHost = uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
-    return originHost == host || uri.host == host;
+    if (uri == null || uri.host.isEmpty || host == null) return false;
+    // Rebuild the authority exactly as a browser writes it into the Host
+    // header — the port present only when it is not the scheme default —
+    // and require a full match. Comparing host alone (the old fallback)
+    // would accept a same-hostname, different-port Origin, defeating the
+    // port dimension of the guard.
+    final defaultPort = uri.scheme == 'https' ? 443 : 80;
+    final originAuthority = (uri.hasPort && uri.port != defaultPort)
+        ? '${uri.host}:${uri.port}'
+        : uri.host;
+    return originAuthority == host;
   }
 
   int? _requireWatch(String idText) {
@@ -496,11 +504,12 @@ class AppServer {
 
   /// Every mutation answers with the fresh snapshot, so the client applies
   /// the server's authoritative state in the same round trip it changed it.
+  /// The revision has already advanced inside the Store mutation itself (the
+  /// one choke point REST and MCP share), so this only serializes it.
   Future<void> _mutated(
     HttpResponse response, {
     Map<String, Object?> extra = const {},
   }) async {
-    store.bumpRevision();
     await _json(response, HttpStatus.ok, {
       ...extra,
       'snapshot': store.exportSnapshot(),

@@ -43,6 +43,10 @@ class ValueCell<T> extends StoreListenable {
   T _value;
   T get value => _value;
   set value(T next) {
+    // No-op when unchanged, so a repeated identical assignment (a cleared
+    // error set to null again, the same sync error re-recorded) does not
+    // churn a rebuild.
+    if (_value == next) return;
     _value = next;
     notifyListeners();
   }

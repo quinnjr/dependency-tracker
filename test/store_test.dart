@@ -462,11 +462,23 @@ void main() {
     });
 
     test('importSnapshot replaces, not merges', () {
+      // The source holds one watch; every server-side mutation advances the
+      // revision, so its snapshot is at least as new as the mirror's.
+      store.upsertWatch(WatchKind.pub, 'http');
       final b = Store.openInMemory();
       addTearDown(b.close);
-      b.upsertWatch(WatchKind.crates, 'serde');
+      b.upsertWatch(WatchKind.crates, 'serde'); // a row the source lacks
       b.importSnapshot(store.exportSnapshot());
-      expect(b.watches(), isEmpty);
+      expect(b.watches().map((w) => w.displayName), ['http']);
+    });
+
+    test('any server-side mutation advances the revision, so an MCP-driven '
+        'change is not a false 304', () {
+      final before = store.revision();
+      // A plain mutation — the kind an MCP tool makes, with no REST wrapper
+      // calling bumpRevision — must still move the ETag.
+      store.upsertWatch(WatchKind.pub, 'http');
+      expect(store.revision(), greaterThan(before));
     });
 
     test('bumpRevision is monotonic and rides along in the export', () {

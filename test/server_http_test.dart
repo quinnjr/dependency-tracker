@@ -253,6 +253,18 @@ void main() {
       expect(r.statusCode, 403);
     });
 
+    test('a same-host, different-port origin is refused', () async {
+      // The server answers as 127.0.0.1:<port>; an Origin on another port is
+      // a different origin, and matching host alone would wrongly accept it.
+      final r = await send(
+        'POST',
+        '/api/auth/login',
+        body: {'username': 'owner', 'password': 'a-strong-password'},
+        headers: {'origin': 'http://127.0.0.1:1'},
+      );
+      expect(r.statusCode, 403);
+    });
+
     test(
       'register sets Secure only over TLS (via x-forwarded-proto)',
       () async {

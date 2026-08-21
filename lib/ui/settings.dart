@@ -502,7 +502,7 @@ class _SettingsPaneState extends State<SettingsPane> {
           _SettingsSection(
             label: 'MCP server',
             children: [
-              if (widget.mcpError != null)
+              if (widget.mcpError != null) ...[
                 Text(
                   'The MCP server is not running: '
                   '${redact(widget.mcpError.toString())}',
@@ -511,20 +511,14 @@ class _SettingsPaneState extends State<SettingsPane> {
                     color: t.behind,
                     height: 1.4,
                   ),
-                )
-              else if (widget.isWeb) ...[
+                ),
+                const SizedBox(height: 9),
+              ] else if (widget.isWeb) ...[
                 Text(
                   'Agents connect to $mcpPath on this server.',
                   style: monoStyle(color: t.ink, size: 12.5),
                 ),
                 const SizedBox(height: 9),
-                Text(
-                  'Agents authenticate with an API key. Each key is shown '
-                  'once, when it is created — only a hash is kept.',
-                  style: body,
-                ),
-                const SizedBox(height: 8),
-                ..._keyManager(t, body),
               ] else if (widget.mcpPort != null) ...[
                 Text(
                   'http://127.0.0.1:${widget.mcpPort}$mcpPath',
@@ -533,6 +527,17 @@ class _SettingsPaneState extends State<SettingsPane> {
                 const SizedBox(height: 4),
                 Text('Loopback only.', style: body),
                 const SizedBox(height: 9),
+              ] else
+                Text('Starting…', style: body),
+              // The key list is pure store state, so it is manageable even
+              // when the socket failed to bind — a user whose MCP server
+              // will not start still needs to mint or revoke the keys it
+              // will authenticate with once it does. Only the desktop
+              // pre-bind "Starting…" window (no web, no error, no port yet)
+              // has no keys to show.
+              if (widget.isWeb ||
+                  widget.mcpError != null ||
+                  widget.mcpPort != null) ...[
                 Text(
                   'Agents authenticate with an API key. Each key is shown '
                   'once, when it is created — only a hash is kept.',
@@ -540,8 +545,7 @@ class _SettingsPaneState extends State<SettingsPane> {
                 ),
                 const SizedBox(height: 8),
                 ..._keyManager(t, body),
-              ] else
-                Text('Starting…', style: body),
+              ],
             ],
           ),
 

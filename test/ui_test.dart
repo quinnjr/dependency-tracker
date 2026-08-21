@@ -337,7 +337,27 @@ void main() {
     store.insertReleases(id, [Release(watchId: id, version: '2.0.0')]);
 
     await tester.pumpWidget(MaterialApp(home: app()));
-    expect(find.text('1 project · no resolved pin'), findsOneWidget);
+    expect(find.text('1 project · pinned by range only'), findsOneWidget);
+  });
+
+  testWidgets('a scanned-but-unfetched watch says so, not "no resolved pin"', (
+    tester,
+  ) async {
+    final id = store.upsertWatch(WatchKind.pub, 'http');
+    store.replaceUsagesForProject('/repos/a', 'pubspec.lock', [
+      Usage(
+        watchId: id,
+        projectPath: '/repos/a',
+        manifestFile: 'pubspec.lock',
+        pinnedVersion: '1.2.0',
+        isResolved: true,
+        isDevDep: false,
+      ),
+    ]);
+    // No releases fetched: driftFor omits it, so drift is null even though a
+    // real resolved pin exists.
+    await tester.pumpWidget(MaterialApp(home: app()));
+    expect(find.text('1 project · no releases fetched yet'), findsOneWidget);
   });
 
   testWidgets('the masthead counts every filter, not just the active one', (
