@@ -168,6 +168,13 @@ class Store extends ChangeNotifier implements EtagCache {
         read INTEGER NOT NULL DEFAULT 0,
         UNIQUE(watch_id, version)
       );
+      CREATE TABLE IF NOT EXISTS api_key (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        key_hash TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        last_used_at INTEGER
+      );
       CREATE TABLE IF NOT EXISTS http_cache (
         url TEXT PRIMARY KEY,
         etag TEXT,
@@ -867,6 +874,65 @@ class Store extends ChangeNotifier implements EtagCache {
       .select('SELECT DISTINCT project_path FROM usage ORDER BY project_path')
       .map((r) => r['project_path'] as String)
       .toList();
+
+  // --- api keys ----------------------------------------------------------------
+  //
+  // Named MCP API keys, stored hash-only (see lib/api_keys.dart for minting
+  // and authentication). `api_key` is UI-visible state — the settings pane
+  // renders the key list — so insert and revoke follow the notify
+  // convention. [touchApiKey] is the deliberate exception: it runs on every
+  // authenticated MCP request, and a per-request UI rebuild would be a
+  // denial-of-service on the shell.
+
+  int insertApiKey(String name, String keyHash) {
+    final rows = _db.select(
+      'INSERT INTO api_key (name, key_hash, created_at) VALUES (?, ?, ?) '
+      'RETURNING id',
+      [name, keyHash, _epoch(DateTime.now())],
+    );
+    final id = rows.first['id'] as int;
+    _deferOrNotify();
+    return id;
+  }
+
+  List<ApiKeyInfo> apiKeys() => _db
+      .select(
+        'SELECT id, name, created_at, last_used_at FROM api_key ORDER BY name',
+      )
+      .map(
+        (r) => ApiKeyInfo(
+          id: r['id'] as int,
+          name: r['name'] as String,
+          createdAt: DateTime.fromMillisecondsSinceEpoch(
+            (r['created_at'] as int) * 1000,
+            isUtc: true,
+          ),
+          lastUsedAt: r['last_used_at'] == null
+              ? null
+              : DateTime.fromMillisecondsSinceEpoch(
+                  (r['last_used_at'] as int) * 1000,
+                  isUtc: true,
+                ),
+        ),
+      )
+      .toList();
+
+  void revokeApiKey(int id) {
+    _db.execute('DELETE FROM api_key WHERE id = ?', [id]);
+    _deferOrNotify();
+  }
+
+  int? apiKeyIdForHash(String keyHash) {
+    final rows = _db.select('SELECT id FROM api_key WHERE key_hash = ?', [
+      keyHash,
+    ]);
+    return rows.isEmpty ? null : rows.first['id'] as int;
+  }
+
+  void touchApiKey(int id, DateTime at) => _db.execute(
+    'UPDATE api_key SET last_used_at = ? WHERE id = ?',
+    [_epoch(at), id],
+  );
 
   // --- scan roots --------------------------------------------------------------
 

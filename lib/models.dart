@@ -145,3 +145,19 @@ class ScanResult {
   final int depsFound;
   final List<String> errors;
 }
+
+/// A named MCP API key as the UI may see it: metadata only, never the hash
+/// (and the key itself exists nowhere after minting).
+class ApiKeyInfo {
+  const ApiKeyInfo({
+    required this.id,
+    required this.name,
+    required this.createdAt,
+    this.lastUsedAt,
+  });
+
+  final int id;
+  final String name;
+  final DateTime createdAt;
+  final DateTime? lastUsedAt;
+}
