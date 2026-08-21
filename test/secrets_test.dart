@@ -1,5 +1,6 @@
 import 'package:deptracker/redact.dart';
 import 'package:deptracker/secrets.dart';
+import 'package:deptracker/secrets_keyring.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 

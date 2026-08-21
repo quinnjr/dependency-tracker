@@ -169,6 +169,20 @@ void main() {
       expect(clocked.verifyAccess(r.accessJwt), isNull);
     });
 
+    test(
+      'resetPassword swaps the credential and refuses unknown users',
+      () async {
+        await auth.register('owner', 'a-strong-password');
+        expect(
+          await auth.resetPassword('owner', 'a-brand-new-password'),
+          isTrue,
+        );
+        expect(await auth.login('owner', 'a-strong-password'), isNull);
+        expect(await auth.login('owner', 'a-brand-new-password'), isNotNull);
+        expect(await auth.resetPassword('ghost', 'whatever-password'), isFalse);
+      },
+    );
+
     test('password hashes at rest are argon2id, not the password', () async {
       await auth.register('owner', 'a-strong-password');
       final u = store.userByName('owner')!;

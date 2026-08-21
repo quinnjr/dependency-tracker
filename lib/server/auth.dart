@@ -124,6 +124,19 @@ class Auth {
   void logout(String presentedRefreshToken) =>
       _store.deleteRefreshToken(hashApiKey(presentedRefreshToken));
 
+  /// CLI-only recovery path (`bin/server.dart --reset-password`); there is
+  /// deliberately no HTTP route to this. Returns false for an unknown
+  /// account.
+  Future<bool> resetPassword(String username, String password) async {
+    final user = _store.userByName(username.trim().toLowerCase());
+    if (user == null) return false;
+    if (password.length < 8) {
+      throw ArgumentError('password of at least 8 chars required');
+    }
+    _store.setUserPasswordHash(user.id, await _hashPassword(password));
+    return true;
+  }
+
   /// Claims of a valid access JWT, or null.
   Map<String, Object?>? verifyAccess(String jwt) =>
       verifyJwt(jwt, _jwtKey, now: _now);

@@ -9,6 +9,7 @@ import '../paths.dart';
 import '../refresh.dart';
 import '../scanner.dart';
 import '../secrets.dart';
+import '../secrets_keyring.dart';
 import '../store.dart';
 import 'app_resources.dart';
 

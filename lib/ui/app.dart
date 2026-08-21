@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../notify.dart';
 import '../refresh.dart';
 import '../store.dart';
 import 'theme.dart';
@@ -64,9 +65,9 @@ class _AppShellState extends State<AppShell> {
 
     // Rebuilding on any store change is what makes an MCP mutation appear in
     // the open window without a refresh button press.
-    return ListenableBuilder(
+    return NotifierBuilder(
       listenable: widget.store,
-      builder: (context, _) {
+      builder: (context) {
         // Every filter's membership is needed anyway — the masthead shows all
         // three counts — so the lists are built once here and the selected one
         // is handed to the list pane. That makes the counts and the rows
@@ -277,4 +278,53 @@ class _CountTab extends StatelessWidget {
       ),
     );
   }
+}
+
+/// `ListenableBuilder` for a [StoreListenable]: rebuilds [builder] on every
+/// notification. Exists because [Store] deliberately does not extend
+/// Flutter's `ChangeNotifier` — the server binary runs it on the plain VM
+/// where `dart:ui` is unavailable — so this widget is the one bridge from
+/// the pure-Dart notifier to the widget tree.
+class NotifierBuilder extends StatefulWidget {
+  const NotifierBuilder({
+    super.key,
+    required this.listenable,
+    required this.builder,
+  });
+
+  final StoreListenable listenable;
+  final Widget Function(BuildContext context) builder;
+
+  @override
+  State<NotifierBuilder> createState() => _NotifierBuilderState();
+}
+
+class _NotifierBuilderState extends State<NotifierBuilder> {
+  @override
+  void initState() {
+    super.initState();
+    widget.listenable.addListener(_changed);
+  }
+
+  @override
+  void didUpdateWidget(NotifierBuilder oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.listenable, widget.listenable)) {
+      oldWidget.listenable.removeListener(_changed);
+      widget.listenable.addListener(_changed);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.listenable.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context);
 }

@@ -1,10 +1,12 @@
-import 'package:flutter/foundation.dart';
+import 'dart:typed_data';
+
 import 'package:sqlite3/common.dart';
 
 import 'canonicalize.dart';
 import 'db/db_open_io.dart' if (dart.library.js_interop) 'db/db_open_web.dart';
 import 'models.dart';
 import 'net.dart';
+import 'notify.dart';
 import 'versions.dart';
 
 const _schemaVersion = 1;
@@ -76,7 +78,7 @@ class Drift {
 /// `meta` and `http_cache` are internal bookkeeping the UI never renders and
 /// are exempt from the rule entirely — see the "meta and http cache" section
 /// below for the specifics.
-class Store extends ChangeNotifier implements EtagCache {
+class Store extends StoreListenable implements EtagCache {
   Store._(this._db);
 
   final CommonDatabase _db;
