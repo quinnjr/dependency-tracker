@@ -33,3 +33,17 @@ class StoreListenable {
     _listeners.clear();
   }
 }
+
+/// A single observable value over [StoreListenable] — the pure-Dart stand-in
+/// for Flutter's `ValueNotifier`, for state (like the web client's last sync
+/// error) that both pure sync code and widgets need to share.
+class ValueCell<T> extends StoreListenable {
+  ValueCell(this._value);
+
+  T _value;
+  T get value => _value;
+  set value(T next) {
+    _value = next;
+    notifyListeners();
+  }
+}

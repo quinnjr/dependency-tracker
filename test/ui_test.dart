@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:deptracker/models.dart';
 import 'package:deptracker/refresh.dart';
+import 'package:deptracker/bootstrap/app_resources.dart';
 import 'package:deptracker/store.dart';
 import 'package:deptracker/ui/app.dart';
 
@@ -12,6 +13,7 @@ late int refreshCount;
 
 Widget app() => AppShell(
   store: store,
+  mutations: StoreMutations.local(store),
   settingsPane: const Text('settings pane'),
   onRefresh: (id) async {
     refreshCount++;
@@ -429,6 +431,7 @@ void main() {
       MaterialApp(
         home: AppShell(
           store: store,
+          mutations: StoreMutations.local(store),
           settingsPane: const Text('settings pane'),
           onRefresh: (id) {
             refreshCount++;

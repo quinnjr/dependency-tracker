@@ -52,22 +52,19 @@ Widget pane({int? mcpPort = 51234, Object? mcpError, bool isWeb = false}) =>
         body: SettingsPane(
           store: store,
           secrets: secrets,
+          // Web has no native picker (server paths are typed in) but does
+          // scan — on the server's filesystem, over REST.
           pickDirectory: isWeb ? null : () async => pick,
-          onScan: isWeb
-              ? null
-              : () async {
-                  scans++;
-                  return const ScanResult(
-                    projectsScanned: 2,
-                    depsFound: 9,
-                    errors: [],
-                  );
-                },
-          mcpKeys: McpKeyOps(
-            list: store.apiKeys,
-            create: (name) => mintApiKey(store, name),
-            revoke: store.revokeApiKey,
-          ),
+          onScan: () async {
+            scans++;
+            return const ScanResult(
+              projectsScanned: 2,
+              depsFound: 9,
+              errors: [],
+            );
+          },
+          mcpKeys: McpKeyOps.local(store),
+          mutations: StoreMutations.local(store),
           mcpPort: mcpPort,
           mcpError: mcpError,
           isWeb: isWeb,
@@ -352,24 +349,40 @@ void settingsEdgeTests() {
     expect(find.text('Starting…'), findsOneWidget);
   });
 
-  testWidgets('the web build hides scanning and MCP and says why', (
+  testWidgets('server mode scans by typed server path, no picker', (
     tester,
   ) async {
     await tester.pumpWidget(pane(isWeb: true, mcpPort: null));
     await tester.pumpAndSettle();
 
-    expect(find.text('SCANNED FOLDERS'), findsNothing);
-    expect(find.text('MCP SERVER'), findsNothing);
-    expect(find.textContaining('browser build'), findsOneWidget);
-    expect(find.textContaining('for this tab only'), findsOneWidget);
+    expect(find.text('SERVER MODE'), findsOneWidget);
+    expect(find.text('SCANNED FOLDERS'), findsOneWidget);
+    expect(find.widgetWithText(OutlinedButton, 'Add folder'), findsNothing);
+
+    await tester.enterText(
+      find.byKey(const Key('scan-root-path')),
+      '/srv/code',
+    );
+    await _tap(tester, find.widgetWithText(OutlinedButton, 'Add'));
+    await tester.pumpAndSettle();
+    expect(store.scanRoots(), ['/srv/code']);
+
+    // The key manager renders on web too — keys are the server's.
+    expect(find.text('MCP SERVER'), findsOneWidget);
+    expect(find.byKey(const Key('mcp-key-name')), findsOneWidget);
+    // And the token copy names the server, not a keyring or a tab.
+    expect(find.textContaining('encrypted at rest'), findsOneWidget);
   });
 
-  testWidgets('the desktop build still shows scanning and MCP', (tester) async {
+  testWidgets('the desktop build shows the picker and no server-mode note', (
+    tester,
+  ) async {
     await tester.pumpWidget(pane());
     await tester.pumpAndSettle();
 
     expect(find.text('SCANNED FOLDERS'), findsOneWidget);
     expect(find.text('MCP SERVER'), findsOneWidget);
-    expect(find.textContaining('browser build'), findsNothing);
+    expect(find.text('SERVER MODE'), findsNothing);
+    expect(find.widgetWithText(OutlinedButton, 'Add folder'), findsOneWidget);
   });
 }

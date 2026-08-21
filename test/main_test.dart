@@ -3,7 +3,6 @@
 // a test. `main()` itself stays untestable (it opens the real database, talks
 // to the real keyring, and binds a port), but everything it assembles is
 // injectable and is covered here.
-import 'package:deptracker/api_keys.dart';
 import 'package:deptracker/bootstrap/app_resources.dart';
 import 'package:deptracker/main.dart';
 import 'package:deptracker/models.dart';
@@ -30,20 +29,13 @@ Widget subject({int? mcpPort = 51234, Object? mcpError, bool isWeb = false}) =>
           return const RefreshReport(refreshed: 1, failed: 0, newReleases: 0);
         },
         // The cancelled-pick case: adds nothing, which the wiring test
-        // asserts. On web both closures are null, as bootstrap_web builds.
+        // asserts. Web has no picker (server paths are typed) but does
+        // scan, as bootstrap_web wires it over REST.
         pickDirectory: isWeb ? null : () async => null,
-        onScan: isWeb
-            ? null
-            : () async => const ScanResult(
-                projectsScanned: 0,
-                depsFound: 0,
-                errors: [],
-              ),
-        mcpKeys: McpKeyOps(
-          list: store.apiKeys,
-          create: (name) => mintApiKey(store, name),
-          revoke: store.revokeApiKey,
-        ),
+        onScan: () async =>
+            const ScanResult(projectsScanned: 0, depsFound: 0, errors: []),
+        mcpKeys: McpKeyOps.local(store),
+        mutations: StoreMutations.local(store),
         mcpPort: mcpPort,
         mcpError: mcpError,
         isWeb: isWeb,
@@ -161,15 +153,16 @@ void main() {
     store.close();
   });
 
-  testWidgets('a web resource bag reaches the settings pane as a browser '
-      'build', (tester) async {
+  testWidgets('a web resource bag reaches the settings pane as server mode', (
+    tester,
+  ) async {
     await tester.pumpWidget(subject(isWeb: true, mcpPort: null));
     await tester.pumpAndSettle();
 
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('browser build'), findsOneWidget);
-    expect(find.text('SCANNED FOLDERS'), findsNothing);
+    expect(find.text('SERVER MODE'), findsOneWidget);
+    expect(find.byKey(const Key('scan-root-path')), findsOneWidget);
   });
 }

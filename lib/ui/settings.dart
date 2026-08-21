@@ -11,18 +11,18 @@ import '../store.dart';
 import 'theme.dart';
 
 /// The settings pane: scan roots, the optional GitHub PAT, and the MCP
-/// server's status.
+/// API-key manager.
 ///
 /// [pickDirectory] is injected so a widget test can supply a path with no
-/// native dialog. [mcpPort] and [mcpError] are also injected: this widget
-/// never starts or owns the transport, it only reports what `main.dart`
-/// already decided at launch.
+/// native dialog; when it is null but [onScan] is not — the server-backed
+/// web build, where the paths are the server's — the add-root control is a
+/// typed path field instead of a picker. [mcpPort] and [mcpError] are also
+/// injected: this widget never starts or owns the transport, it only
+/// reports what the bootstrap already decided at launch.
 ///
-/// [isWeb] means the scanner and MCP subsystems were compiled out, not
-/// merely failed: their sections disappear entirely (replaced by a note
-/// saying what a browser build cannot do) rather than rendering an error
-/// state, and [pickDirectory]/[onScan] are null because nothing could ever
-/// call them.
+/// [isWeb] selects the server-mode copy and sections: a note about where
+/// the data lives, the account section (driven by [auth]), and the MCP
+/// endpoint shown as a path on this origin rather than a loopback port.
 class SettingsPane extends StatefulWidget {
   const SettingsPane({
     super.key,
@@ -31,13 +31,12 @@ class SettingsPane extends StatefulWidget {
     required this.pickDirectory,
     required this.onScan,
     required this.mcpKeys,
+    required this.mutations,
     required this.mcpPort,
+    this.auth,
     this.mcpError,
     this.isWeb = false,
-  }) : assert(
-         isWeb || (pickDirectory != null && onScan != null),
-         'the desktop build always has a scanner',
-       );
+  });
 
   final Store store;
   final Secrets secrets;
@@ -48,9 +47,15 @@ class SettingsPane extends StatefulWidget {
   /// against — injected so web can back them with REST.
   final McpKeyOps mcpKeys;
 
+  /// Scan-root mutations — injected for the same reason.
+  final StoreMutations mutations;
+
   final int? mcpPort;
 
-  /// Non-null when the MCP server could not start — most often no keyring.
+  /// Present on web: drives the account section.
+  final AuthController? auth;
+
+  /// Non-null when the MCP server could not start.
   final Object? mcpError;
 
   final bool isWeb;
@@ -62,11 +67,14 @@ class SettingsPane extends StatefulWidget {
 class _SettingsPaneState extends State<SettingsPane> {
   final _patController = TextEditingController();
   final _keyNameController = TextEditingController();
+  final _rootPathController = TextEditingController();
   String? _scanSummary;
   var _scanning = false;
   var _hasStoredPat = false;
   String? _patStatus;
   var _patStatusIsError = false;
+
+  List<ApiKeyInfo> _keys = const [];
 
   /// The key minted by the most recent "Create key" tap. Held only until the
   /// next mint (or pane rebuild from scratch): the hash in the store is all
@@ -78,12 +86,14 @@ class _SettingsPaneState extends State<SettingsPane> {
   void initState() {
     super.initState();
     _loadPatPresence();
+    _loadKeys();
   }
 
   @override
   void dispose() {
     _patController.dispose();
     _keyNameController.dispose();
+    _rootPathController.dispose();
     super.dispose();
   }
 
@@ -96,11 +106,28 @@ class _SettingsPaneState extends State<SettingsPane> {
     }
   }
 
+  Future<void> _loadKeys() async {
+    try {
+      final keys = await widget.mcpKeys.list();
+      if (mounted) setState(() => _keys = keys);
+    } catch (e) {
+      if (mounted) setState(() => _keyError = redact(e.toString()));
+    }
+  }
+
   Future<void> _addRoot() async {
     final path = await widget.pickDirectory!();
     if (path == null || path.isEmpty) return;
-    widget.store.addScanRoot(path);
+    widget.mutations.addScanRoot(path);
     if (mounted) setState(() {});
+  }
+
+  void _addTypedRoot() {
+    final path = _rootPathController.text.trim();
+    if (path.isEmpty) return;
+    widget.mutations.addScanRoot(path);
+    _rootPathController.clear();
+    setState(() {});
   }
 
   Future<void> _scan() async {
@@ -131,7 +158,7 @@ class _SettingsPaneState extends State<SettingsPane> {
       if (!mounted) return;
       setState(() {
         _patStatus = widget.isWeb
-            ? 'Token saved for this tab session.'
+            ? 'Token saved to the server, encrypted at rest.'
             : 'Token saved to the host keyring.';
         _patStatusIsError = false;
       });
@@ -150,32 +177,36 @@ class _SettingsPaneState extends State<SettingsPane> {
     }
   }
 
-  void _createKey() {
+  Future<void> _createKey() async {
     final name = _keyNameController.text.trim();
     if (name.isEmpty) {
       setState(() => _keyError = 'Name the key first — e.g. "claude-code".');
       return;
     }
     try {
-      final minted = widget.mcpKeys.create(name);
+      final minted = await widget.mcpKeys.create(name);
       _keyNameController.clear();
+      if (!mounted) return;
       setState(() {
         _justMinted = minted;
         _keyError = null;
       });
     } catch (e) {
       // The one expected failure is a duplicate name (UNIQUE on api_key).
-      setState(() => _keyError = redact(e.toString()));
+      if (mounted) setState(() => _keyError = redact(e.toString()));
     }
+    await _loadKeys();
   }
 
-  void _revokeKey(int id) {
-    widget.mcpKeys.revoke(id);
+  Future<void> _revokeKey(int id) async {
+    await widget.mcpKeys.revoke(id);
+    if (!mounted) return;
     setState(() {
       // A revoked key's show-once box must not linger: the key it shows no
       // longer authenticates anything.
       if (_justMinted?.id == id) _justMinted = null;
     });
+    await _loadKeys();
   }
 
   /// The API-key manager rows: existing keys, the show-once box for a key
@@ -183,15 +214,14 @@ class _SettingsPaneState extends State<SettingsPane> {
   List<Widget> _keyManager(DriftTokens t, TextStyle body) {
     String stamp(DateTime d) =>
         '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-    final keys = widget.mcpKeys.list();
     return [
-      if (keys.isEmpty)
+      if (_keys.isEmpty)
         Text(
           'No keys yet — agents cannot connect until one exists.',
           style: body,
         )
       else
-        for (final k in keys)
+        for (final k in _keys)
           Padding(
             padding: const EdgeInsets.only(bottom: 2),
             child: Row(
@@ -270,32 +300,32 @@ class _SettingsPaneState extends State<SettingsPane> {
     final t = tokensOf(context);
     final roots = widget.store.scanRoots();
     final body = TextStyle(fontSize: 13, color: t.slate, height: 1.5);
+    final auth = widget.auth;
 
     return ListView(
       padding: EdgeInsets.zero,
       children: [
         if (widget.isWeb)
           _SettingsSection(
-            label: 'Browser build',
+            label: 'Server mode',
             first: true,
             children: [
               Text(
-                'This is the browser build. It cannot scan folders on disk '
-                'or run the MCP server; watches are added by hand. GitHub '
-                'release notes need a token here, because github.com feeds '
-                'do not allow cross-origin reads.',
+                'This browser is a client of the deptracker server, which '
+                'owns the watch database, does all the fetching, and scans '
+                'its own filesystem. Scan roots below are server paths.',
                 style: body,
               ),
             ],
-          )
-        else
+          ),
+        if (widget.onScan != null)
           _SettingsSection(
             label: 'Scanned folders',
-            first: true,
+            first: !widget.isWeb,
             children: [
               Text(
-                'Each folder is walked three levels deep, skipping node_modules, '
-                'target, build, and similar.',
+                'Each folder is walked three levels deep, skipping '
+                'node_modules, target, build, and similar.',
                 style: body,
               ),
               const SizedBox(height: 9),
@@ -319,7 +349,7 @@ class _SettingsPaneState extends State<SettingsPane> {
                           tooltip: 'Remove',
                           visualDensity: VisualDensity.compact,
                           onPressed: () {
-                            widget.store.removeScanRoot(path);
+                            widget.mutations.removeScanRoot(path);
                             setState(() {});
                           },
                         ),
@@ -327,19 +357,46 @@ class _SettingsPaneState extends State<SettingsPane> {
                     ),
                   ),
               const SizedBox(height: 9),
-              Row(
-                children: [
-                  OutlinedButton(
-                    onPressed: _addRoot,
-                    child: const Text('Add folder'),
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    onPressed: _scanning ? null : _scan,
-                    child: const Text('Scan now'),
-                  ),
-                ],
-              ),
+              if (widget.pickDirectory != null)
+                Row(
+                  children: [
+                    OutlinedButton(
+                      onPressed: _addRoot,
+                      child: const Text('Add folder'),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton(
+                      onPressed: _scanning ? null : _scan,
+                      child: const Text('Scan now'),
+                    ),
+                  ],
+                )
+              else
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        key: const Key('scan-root-path'),
+                        controller: _rootPathController,
+                        style: monoStyle(color: t.ink, size: 13),
+                        decoration: const InputDecoration(
+                          labelText: 'Server path',
+                          hintText: '/srv/code',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton(
+                      onPressed: _addTypedRoot,
+                      child: const Text('Add'),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton(
+                      onPressed: _scanning ? null : _scan,
+                      child: const Text('Scan now'),
+                    ),
+                  ],
+                ),
               if (_scanSummary != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 10),
@@ -356,9 +413,10 @@ class _SettingsPaneState extends State<SettingsPane> {
           children: [
             Text(
               widget.isWeb
-                  ? 'Optional for registries, effectively required for '
-                        'GitHub watches in a browser. Kept in memory for '
-                        'this tab only — re-enter it next visit.'
+                  ? 'Optional. A token gets richer Markdown notes and '
+                        'faster lookups. Stored on the server, encrypted '
+                        'at rest beside its key file — never in this '
+                        'browser.'
                   : 'Optional. Without one, release notes still come from '
                         'public Atom feeds. A token gets richer Markdown '
                         'notes and faster lookups. Stored in the host '
@@ -409,37 +467,89 @@ class _SettingsPaneState extends State<SettingsPane> {
           ],
         ),
 
-        if (!widget.isWeb)
+        _SettingsSection(
+          label: 'MCP server',
+          children: [
+            if (widget.mcpError != null)
+              Text(
+                'The MCP server is not running: '
+                '${redact(widget.mcpError.toString())}',
+                style: TextStyle(fontSize: 12.5, color: t.behind, height: 1.4),
+              )
+            else if (widget.isWeb) ...[
+              Text(
+                'Agents connect to $mcpPath on this server.',
+                style: monoStyle(color: t.ink, size: 12.5),
+              ),
+              const SizedBox(height: 9),
+              Text(
+                'Agents authenticate with an API key. Each key is shown '
+                'once, when it is created — only a hash is kept.',
+                style: body,
+              ),
+              const SizedBox(height: 8),
+              ..._keyManager(t, body),
+            ] else if (widget.mcpPort != null) ...[
+              Text(
+                'http://127.0.0.1:${widget.mcpPort}$mcpPath',
+                style: monoStyle(color: t.ink, size: 12.5),
+              ),
+              const SizedBox(height: 4),
+              Text('Loopback only.', style: body),
+              const SizedBox(height: 9),
+              Text(
+                'Agents authenticate with an API key. Each key is shown '
+                'once, when it is created — only a hash is kept.',
+                style: body,
+              ),
+              const SizedBox(height: 8),
+              ..._keyManager(t, body),
+            ] else
+              Text('Starting…', style: body),
+          ],
+        ),
+
+        if (auth != null)
           _SettingsSection(
-            label: 'MCP server',
+            label: 'Account',
             children: [
-              if (widget.mcpError != null)
-                Text(
-                  'The MCP server is not running: '
-                  '${redact(widget.mcpError.toString())}',
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    color: t.behind,
-                    height: 1.4,
+              Text(
+                'Signed in as ${auth.username ?? 'unknown'}'
+                '${auth.role == 'admin' ? ' (admin)' : ''}.',
+                style: body,
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  OutlinedButton(
+                    onPressed: auth.logout,
+                    child: const Text('Sign out'),
                   ),
-                )
-              else if (widget.mcpPort != null) ...[
-                Text(
-                  'http://127.0.0.1:${widget.mcpPort}$mcpPath',
-                  style: monoStyle(color: t.ink, size: 12.5),
+                ],
+              ),
+              if (auth.role == 'admin') ...[
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        auth.registrationOpen
+                            ? 'Registration is open: anyone who can reach '
+                                  'this server can create an account.'
+                            : 'Registration is closed.',
+                        style: body,
+                      ),
+                    ),
+                    Switch(
+                      value: auth.registrationOpen,
+                      onChanged: (open) async {
+                        await auth.setRegistrationOpen(open);
+                        if (mounted) setState(() {});
+                      },
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 4),
-                Text('Loopback only.', style: body),
-                const SizedBox(height: 9),
-                Text(
-                  'Agents authenticate with an API key. Each key is shown '
-                  'once, when it is created — only a hash is kept.',
-                  style: body,
-                ),
-                const SizedBox(height: 8),
-                ..._keyManager(t, body),
-              ] else
-                Text('Starting…', style: body),
+              ],
             ],
           ),
       ],

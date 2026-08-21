@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'bootstrap/app_resources.dart';
 import 'bootstrap/bootstrap.dart';
 import 'ui/app.dart';
+import 'ui/login.dart';
 import 'ui/settings.dart';
 import 'ui/theme.dart';
 
@@ -48,6 +49,24 @@ class _TrackerAppState extends State<TrackerApp> {
     super.dispose();
   }
 
+  Widget _shell(AppResources r) => AppShell(
+    store: r.store,
+    mutations: r.mutations,
+    onRefresh: r.refresh,
+    settingsPane: SettingsPane(
+      store: r.store,
+      secrets: r.secrets,
+      pickDirectory: r.pickDirectory,
+      onScan: r.onScan,
+      mcpKeys: r.mcpKeys,
+      mutations: r.mutations,
+      auth: r.auth,
+      mcpPort: r.mcpPort,
+      mcpError: r.mcpError,
+      isWeb: r.isWeb,
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
     final r = widget.resources;
@@ -55,20 +74,52 @@ class _TrackerAppState extends State<TrackerApp> {
       title: 'Dependency Tracker',
       theme: buildTheme(Brightness.light),
       darkTheme: buildTheme(Brightness.dark),
-      home: AppShell(
-        store: r.store,
-        onRefresh: r.refresh,
-        settingsPane: SettingsPane(
-          store: r.store,
-          secrets: r.secrets,
-          pickDirectory: r.pickDirectory,
-          onScan: r.onScan,
-          mcpKeys: r.mcpKeys,
-          mcpPort: r.mcpPort,
-          mcpError: r.mcpError,
-          isWeb: r.isWeb,
-        ),
-      ),
+      home: r.auth == null
+          ? _shell(r)
+          : _AuthGate(resources: r, shell: () => _shell(r)),
+    );
+  }
+}
+
+/// Web only: the shell appears once a session exists; until then, the login
+/// screen. Also surfaces the SyncClient's last failed round trip as a
+/// dismissible banner — a mutation that silently never reached the server
+/// would otherwise look like a UI bug.
+class _AuthGate extends StatelessWidget {
+  const _AuthGate({required this.resources, required this.shell});
+
+  final AppResources resources;
+  final Widget Function() shell;
+
+  @override
+  Widget build(BuildContext context) {
+    final auth = resources.auth!;
+    final syncError = resources.syncError;
+    return NotifierBuilder(
+      listenable: auth.changes,
+      builder: (context) {
+        if (!auth.authenticated) return LoginScreen(auth: auth);
+        final body = shell();
+        if (syncError == null) return body;
+        return NotifierBuilder(
+          listenable: syncError,
+          builder: (context) => Column(
+            children: [
+              if (syncError.value != null)
+                MaterialBanner(
+                  content: Text(syncError.value!),
+                  actions: [
+                    TextButton(
+                      onPressed: () => syncError.value = null,
+                      child: const Text('Dismiss'),
+                    ),
+                  ],
+                ),
+              Expanded(child: body),
+            ],
+          ),
+        );
+      },
     );
   }
 }

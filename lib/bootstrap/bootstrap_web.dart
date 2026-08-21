@@ -1,46 +1,34 @@
-import '../api_keys.dart';
-import '../net.dart';
-import '../refresh.dart';
+import '../client/rest_secrets.dart';
+import '../client/sync_client.dart';
 import '../secrets.dart';
 import '../store.dart';
 import 'app_resources.dart';
 
-// The web build assembles less on purpose: no scanner (no filesystem), no
-// MCP server (no listening socket), no keyring (no OS secret service). The
-// GitHub token lives in MemorySecretBackend for the tab session — the
-// README's no-plaintext-at-rest rule rules out localStorage-backed stores.
+// The web build assembles a thin client: an in-memory mirror Store the
+// SyncClient hydrates from the server's snapshot, and REST-backed versions
+// of every operation with a side effect. No scanner closure of its own —
+// scanning happens on the server's filesystem, triggered over REST — no
+// keyring, no Net (the server does all fetching), and no local MCP.
 // coverage:ignore-start
 Future<AppResources> bootstrap() async {
-  final store = await Store.openAsync('deptracker.db');
-  final secrets = Secrets(MemorySecretBackend());
-  final net = Net(cache: store);
-
-  // No KeyringUnavailable guard around githubToken(): MemorySecretBackend
-  // cannot throw it, unlike the io bootstrap's keyring path.
-  Future<RefreshReport> refresh(int? watchId) async => refreshAll(
-    store,
-    net,
-    token: await secrets.githubToken(),
-    onlyWatchId: watchId,
-  );
+  // In-memory on purpose, where the static build used IndexedDB: the server
+  // is the persistence now, and a locally persisted mirror could only ever
+  // misrepresent it after someone else's mutation.
+  final store = await Store.openAsync(':memory:');
+  final sync = SyncClient(Uri.base, store);
+  await sync.initialize();
 
   return AppResources(
     store: store,
-    secrets: secrets,
-    net: net,
-    refresh: refresh,
+    secrets: Secrets(RestSecretBackend(sync)),
+    refresh: sync.refresh,
+    onScan: sync.scan,
+    mcpKeys: sync.mcpKeys,
+    mutations: sync.mutations,
+    auth: sync,
+    syncError: sync.syncError,
     isWeb: true,
-    // Backed by the local store like everything else here; the settings
-    // pane hides the MCP section on web, so these never run — but they are
-    // real operations, not stubs, and the server-mode client will replace
-    // them with REST-backed ones.
-    mcpKeys: McpKeyOps(
-      list: store.apiKeys,
-      create: (name) => mintApiKey(store, name),
-      revoke: store.revokeApiKey,
-    ),
     shutdown: () async {
-      net.close();
       store.close();
     },
   );

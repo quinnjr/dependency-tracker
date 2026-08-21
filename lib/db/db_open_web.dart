@@ -15,9 +15,9 @@ Future<CommonDatabase> openDatabaseAsync(String ref) async {
   // Served from the app's own origin next to index.html; vendored under
   // web/ with a checksum, the same arrangement as the Windows sqlite3.dll.
   final sqlite = await WasmSqlite3.loadFromUrl(Uri.parse('sqlite3.wasm'));
-  sqlite.registerVirtualFileSystem(
-    await IndexedDbFileSystem.open(dbName: 'deptracker'),
-    makeDefault: true,
-  );
+  // In-memory, not IndexedDB: the browser Store is a disposable mirror of
+  // the server's database, and locally persisted state could only ever
+  // misrepresent the server after someone else's mutation.
+  sqlite.registerVirtualFileSystem(InMemoryFileSystem(), makeDefault: true);
   return sqlite.open(ref);
 }

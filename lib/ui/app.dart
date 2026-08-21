@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../bootstrap/app_resources.dart';
 import '../notify.dart';
 import '../refresh.dart';
 import '../store.dart';
@@ -11,11 +12,16 @@ class AppShell extends StatefulWidget {
   const AppShell({
     super.key,
     required this.store,
+    required this.mutations,
     required this.onRefresh,
     required this.settingsPane,
   });
 
   final Store store;
+
+  /// Writes the detail pane performs; reads stay on [store].
+  final StoreMutations mutations;
+
   final Future<RefreshReport> Function(int? watchId) onRefresh;
   final Widget settingsPane;
 
@@ -112,6 +118,7 @@ class _AppShellState extends State<AppShell> {
                       Expanded(
                         child: WatchDetail(
                           store: widget.store,
+                          mutations: widget.mutations,
                           watchId: _selected,
                         ),
                       ),

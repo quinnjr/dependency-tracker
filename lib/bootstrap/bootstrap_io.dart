@@ -64,11 +64,8 @@ Future<AppResources> bootstrap() async {
     pickDirectory: () => FilePicker.platform.getDirectoryPath(),
     mcpPort: mcpPort,
     mcpError: mcpError,
-    mcpKeys: McpKeyOps(
-      list: store.apiKeys,
-      create: (name) => mintApiKey(store, name),
-      revoke: store.revokeApiKey,
-    ),
+    mcpKeys: McpKeyOps.local(store),
+    mutations: StoreMutations.local(store),
     shutdown: () async {
       await transport.stop();
       net.close();
