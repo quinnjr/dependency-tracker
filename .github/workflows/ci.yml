@@ -93,6 +93,35 @@ jobs:
       - uses: ./.github/actions/setup-flutter
       - run: flutter build ${{ matrix.target }} --release
 
+  build-web:
+    name: Build (web)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same reasoning as the Windows DLL gate above: a prebuilt binary a
+      # reviewer cannot read in a diff gets its recorded checksum verified
+      # rather than trusted.
+      - name: Verify vendored sqlite3.wasm
+        run: |
+          set -euo pipefail
+          cd web
+          sha256sum -c sqlite3.wasm.sha256
+
+      - uses: ./.github/actions/setup-flutter
+
+      # Doubles as the leak gate: this compile fails if any dart:io-only
+      # import (scanner, keyring, MCP transport, FFI sqlite3) reaches the
+      # web target through the conditional-import seams.
+      - name: Build the web target
+        run: flutter build web --release
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-build
+          path: build/web
+
   flatpak:
     name: Flatpak (build, resolve, launch)
     runs-on: ubuntu-24.04

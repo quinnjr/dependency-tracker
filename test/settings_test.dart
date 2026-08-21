@@ -66,7 +66,7 @@ Widget pane({int? mcpPort = 51234, Object? mcpError, bool isWeb = false}) =>
           isWeb: isWeb,
         ),
       ),
-);
+    );
 
 /// Scrolls [f] into view, then taps it.
 ///
@@ -332,9 +332,7 @@ void settingsEdgeTests() {
     expect(find.textContaining('for this tab only'), findsOneWidget);
   });
 
-  testWidgets('the desktop build still shows scanning and MCP', (
-    tester,
-  ) async {
+  testWidgets('the desktop build still shows scanning and MCP', (tester) async {
     await tester.pumpWidget(pane());
     await tester.pumpAndSettle();
 

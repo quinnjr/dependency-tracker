@@ -50,6 +50,35 @@ flutter run -d linux
 
 On Linux, a secret service such as gnome-keyring must be running; see the Secrets section for details.
 
+## Web build
+
+```
+flutter build web --release
+```
+
+The output under `build/web/` is static files, meant to be served by a
+container image later — there is no hosted deployment in this repo. SQLite
+runs as WebAssembly (`web/sqlite3.wasm`, vendored and checksummed) with the
+watch database persisted in the browser's IndexedDB.
+
+A browser build is a reduced version of the app, by nature rather than by
+switch:
+
+- **No disk scanning.** There is no filesystem; watches are added by hand.
+- **No MCP server.** Nothing can listen on a socket in a page.
+- **The GitHub token is kept in memory for the tab session only.** There is
+  no keyring, and this app does not store secrets at rest in weaker places —
+  re-enter the token next visit.
+- **GitHub watches effectively require a token.** The no-token default path
+  reads `github.com/.../releases.atom`, and github.com sends no CORS
+  headers, so a browser cannot fetch it; `api.github.com` does allow it,
+  with a token or without one at 60 requests/hour.
+- **RSS/Atom watches work only when the feed host allows cross-origin
+  reads.** Failures surface per-watch as fetch errors, same as any other.
+
+The registry APIs (pub.dev, npm, crates.io, PyPI, the Go module proxy) allow
+cross-origin requests and work unchanged.
+
 ## Testing
 
 ```

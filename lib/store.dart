@@ -425,10 +425,7 @@ class Store extends ChangeNotifier implements EtagCache {
   /// three filters'-worth of watches simultaneously and would otherwise pay
   /// for the base scan three times per rebuild (the two `IN`-queries only
   /// ever ran once each; the redundancy was in the base scans).
-  Map<WatchFilter, List<Watch>> watchesByFilter({
-    WatchKind? kind,
-    int? limit,
-  }) {
+  Map<WatchFilter, List<Watch>> watchesByFilter({WatchKind? kind, int? limit}) {
     final all = _baseWatches(kind);
     final candidates = _unsnoozed(all);
     final candidateIds = candidates.map((w) => w.id!).toList();
