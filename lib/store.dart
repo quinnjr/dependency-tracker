@@ -1,7 +1,8 @@
 import 'package:flutter/foundation.dart';
-import 'package:sqlite3/sqlite3.dart';
+import 'package:sqlite3/common.dart';
 
 import 'canonicalize.dart';
+import 'db/db_open_io.dart' if (dart.library.js_interop) 'db/db_open_io.dart';
 import 'models.dart';
 import 'net.dart';
 import 'versions.dart';
@@ -78,7 +79,7 @@ class Drift {
 class Store extends ChangeNotifier implements EtagCache {
   Store._(this._db);
 
-  final Database _db;
+  final CommonDatabase _db;
   bool _closed = false;
   bool _inTransaction = false;
   bool _pendingNotify = false;
@@ -88,18 +89,17 @@ class Store extends ChangeNotifier implements EtagCache {
   // transaction — re-preparing two fixed SQL strings per dependency is the
   // per-row overhead [insertReleases] and [replaceUsagesForProject] already
   // avoid with their prepare-once/execute-many statements.
-  PreparedStatement? _upsertWatchInsert;
-  PreparedStatement? _upsertWatchSelect;
+  CommonPreparedStatement? _upsertWatchInsert;
+  CommonPreparedStatement? _upsertWatchSelect;
 
   static Store open(String file) {
-    final db = sqlite3.open(file);
-    final store = Store._(db);
+    final store = Store._(openDatabaseFile(file));
     store._migrate();
     return store;
   }
 
   static Store openInMemory() {
-    final store = Store._(sqlite3.openInMemory());
+    final store = Store._(openDatabaseInMemory());
     store._migrate();
     return store;
   }
@@ -828,7 +828,7 @@ class Store extends ChangeNotifier implements EtagCache {
     List<Usage> usages,
   ) {
     runInTransaction(() {
-      PreparedStatement? stmt;
+      CommonPreparedStatement? stmt;
       try {
         _db.execute(
           'DELETE FROM usage WHERE project_path = ? AND manifest_file = ?',
