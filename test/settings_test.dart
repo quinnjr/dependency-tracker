@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:deptracker/api_keys.dart';
+import 'package:deptracker/bootstrap/app_resources.dart';
 import 'package:deptracker/scanner.dart';
 import 'package:deptracker/secrets.dart';
 import 'package:deptracker/store.dart';
@@ -61,6 +63,11 @@ Widget pane({int? mcpPort = 51234, Object? mcpError, bool isWeb = false}) =>
                     errors: [],
                   );
                 },
+          mcpKeys: McpKeyOps(
+            list: store.apiKeys,
+            create: (name) => mintApiKey(store, name),
+            revoke: store.revokeApiKey,
+          ),
           mcpPort: mcpPort,
           mcpError: mcpError,
           isWeb: isWeb,
@@ -176,36 +183,59 @@ void main() {
     expect(find.textContaining('51234'), findsOneWidget);
   });
 
-  testWidgets('the mcp token is not displayed until asked for', (tester) async {
-    final token = await secrets.mcpToken();
+  testWidgets('creating a key shows it exactly once, and only its hash '
+      'survives', (tester) async {
     await tester.pumpWidget(pane());
     await tester.pumpAndSettle();
-    expect(find.textContaining(token), findsNothing);
-    await _tap(tester, find.widgetWithText(TextButton, 'Reveal token'));
+
+    await tester.enterText(
+      find.byKey(const Key('mcp-key-name')),
+      'claude-code',
+    );
+    await _tap(tester, find.widgetWithText(OutlinedButton, 'Create key'));
     await tester.pumpAndSettle();
-    expect(find.textContaining(token), findsOneWidget);
+
+    // The minted key is on screen once, marked unrepeatable, and works.
+    final shown = tester
+        .widget<SelectableText>(find.byType(SelectableText))
+        .data!;
+    expect(shown, startsWith('dtk_'));
+    expect(find.textContaining('cannot be shown again'), findsOneWidget);
+    expect(authenticateApiKey(store, shown), isNotNull);
+    expect(store.apiKeys().single.name, 'claude-code');
   });
 
-  testWidgets('rotating the mcp token replaces it with a new one (M3)', (
+  testWidgets('revoking a key removes it from the list and the store', (
     tester,
   ) async {
+    final minted = mintApiKey(store, 'stale-agent');
     await tester.pumpWidget(pane());
     await tester.pumpAndSettle();
-    await _tap(tester, find.widgetWithText(TextButton, 'Reveal token'));
-    await tester.pumpAndSettle();
-    final before = await secrets.mcpToken();
-    expect(find.textContaining(before), findsOneWidget);
+    expect(find.textContaining('stale-agent'), findsOneWidget);
 
-    await _tap(
-      tester,
-      find.byTooltip('Rotate token — invalidates the current one'),
+    await _tap(tester, find.byTooltip('Revoke'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('stale-agent'), findsNothing);
+    expect(authenticateApiKey(store, minted.key), isNull);
+  });
+
+  testWidgets('a duplicate key name is refused with an inline message', (
+    tester,
+  ) async {
+    mintApiKey(store, 'claude-code');
+    await tester.pumpWidget(pane());
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const Key('mcp-key-name')),
+      'claude-code',
     );
+    await _tap(tester, find.widgetWithText(OutlinedButton, 'Create key'));
     await tester.pumpAndSettle();
 
-    final after = await secrets.mcpToken();
-    expect(after, isNot(before));
-    expect(find.textContaining(after), findsOneWidget);
-    expect(find.textContaining(before), findsNothing);
+    expect(store.apiKeys(), hasLength(1));
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('an mcp startup failure is explained, not hidden', (
@@ -256,7 +286,7 @@ void main() {
 }
 
 // The three remaining branches: a keyring that fails while probing for a
-// stored PAT, copying the revealed MCP token, and the pre-startup state.
+// stored PAT, copying a freshly minted API key, and the pre-startup state.
 void settingsEdgeTests() {
   testWidgets('a keyring failure while probing for a stored PAT is swallowed, '
       'not shown twice', (tester) async {
@@ -275,9 +305,9 @@ void settingsEdgeTests() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('the mcp token can be copied to the clipboard', (tester) async {
-    // The token is never displayed until asked for, so copy is the only
-    // practical way to get it into an agent's config.
+  testWidgets('a minted key can be copied to the clipboard', (tester) async {
+    // The key is shown exactly once, so copy is the only practical way to
+    // get it into an agent's config.
     final copied = <String>[];
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       SystemChannels.platform,
@@ -298,16 +328,18 @@ void settingsEdgeTests() {
     await tester.pumpWidget(pane());
     await tester.pumpAndSettle();
 
-    await _tap(tester, find.text('Reveal token'));
+    await tester.enterText(find.byKey(const Key('mcp-key-name')), 'agent');
+    await _tap(tester, find.widgetWithText(OutlinedButton, 'Create key'));
     await tester.pumpAndSettle();
 
     await _tap(tester, find.widgetWithIcon(IconButton, Icons.copy));
     await tester.pumpAndSettle();
 
     expect(copied, hasLength(1));
-    expect(copied.single, isNotEmpty);
-    // What lands on the clipboard must be the token itself, not a label.
-    expect(copied.single, await secrets.mcpToken());
+    // What lands on the clipboard must be the key itself, not a label —
+    // and it must be the key that actually authenticates.
+    expect(copied.single, startsWith('dtk_'));
+    expect(authenticateApiKey(store, copied.single), isNotNull);
   });
 
   testWidgets('before the server has a port, the pane says it is starting', (

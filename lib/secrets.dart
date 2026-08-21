@@ -1,18 +1,15 @@
-import 'dart:convert';
-import 'dart:math';
-
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'redact.dart';
 
 const String _githubKey = 'github_pat';
-const String _mcpKey = 'mcp_bearer_token';
 
 /// Raised when the host has no usable keyring.
 ///
-/// The spec forbids falling back to a plaintext file or to an unauthenticated
-/// MCP server, so this is fatal for the MCP server and surfaced to the user
-/// rather than swallowed.
+/// The spec forbids falling back to a plaintext file, so this is surfaced to
+/// the user rather than swallowed. It costs only the optional GitHub PAT:
+/// the MCP server authenticates against hashed API keys in the store, not
+/// keyring material, so it runs regardless.
 class KeyringUnavailable implements Exception {
   KeyringUnavailable(this.cause);
   final Object cause;
@@ -71,8 +68,9 @@ class MemorySecretBackend implements SecretBackend {
 ///
 /// Every secret read here is immediately handed to [registerSecret], so a
 /// value cannot be in memory without also being redactable from error text.
-/// Neither the GitHub PAT nor the MCP bearer token is ever passed to `Store`,
-/// written to a config file, or logged — both live only through this class.
+/// The GitHub PAT — the keyring's one remaining tenant now that MCP
+/// authenticates against hashed API keys — is never passed to `Store`,
+/// written to a config file, or logged; it lives only through this class.
 class Secrets {
   Secrets(this._backend);
 
@@ -107,34 +105,6 @@ class Secrets {
     }
     registerSecret(trimmed);
     await _guard(() => _backend.write(_githubKey, trimmed));
-  }
-
-  /// Returns the MCP bearer token, generating and storing one on first use.
-  ///
-  /// Generating on read means there is no separate provisioning step that
-  /// could be skipped, leaving the server running without a token.
-  Future<String> mcpToken() async {
-    final existing = await _guard(() => _backend.read(_mcpKey));
-    if (existing != null && existing.isNotEmpty) {
-      registerSecret(existing);
-      return existing;
-    }
-    return _generateMcpToken();
-  }
-
-  Future<void> rotateMcpToken() async {
-    await _guard(() => _backend.delete(_mcpKey));
-    await _generateMcpToken();
-  }
-
-  Future<String> _generateMcpToken() async {
-    final random = Random.secure();
-    final bytes = List<int>.generate(32, (_) => random.nextInt(256));
-    // base64url without padding: safe in an Authorization header and in JSON.
-    final token = base64Url.encode(bytes).replaceAll('=', '');
-    registerSecret(token);
-    await _guard(() => _backend.write(_mcpKey, token));
-    return token;
   }
 
   Future<T> _guard<T>(Future<T> Function() action) async {

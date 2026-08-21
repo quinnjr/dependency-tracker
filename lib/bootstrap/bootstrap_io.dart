@@ -1,5 +1,6 @@
 import 'package:file_picker/file_picker.dart';
 
+import '../api_keys.dart';
 import '../mcp/protocol.dart';
 import '../mcp/tools.dart';
 import '../mcp/transport.dart';
@@ -33,21 +34,20 @@ Future<AppResources> bootstrap() async {
     onlyWatchId: watchId,
   );
 
-  // The MCP server needs a bearer token, and the token lives in the keyring.
-  // With no keyring there is no authenticated server, and the spec forbids
-  // running an unauthenticated one — so the app runs without MCP and says why.
-  McpTransport? transport;
+  // MCP authenticates against hashed API keys in the store, so unlike the
+  // old keyring-token model there is no secret to acquire before starting —
+  // the failures left for mcpError are real ones (the port would not bind,
+  // the discovery file would not write).
+  final transport = McpTransport(
+    // A factory, not an instance: every MCP session gets its own server, and
+    // the tools close over the live [store] so a session opened an hour ago
+    // still reads current data.
+    onSession: () => buildMcpServer(buildTools(store, refresh: refresh)),
+    authenticate: (k) => authenticateApiKey(store, k),
+  );
   int? mcpPort;
   Object? mcpError;
   try {
-    final token = await secrets.mcpToken();
-    transport = McpTransport(
-      // A factory, not an instance: every MCP session gets its own server, and
-      // the tools close over the live [store] so a session opened an hour ago
-      // still reads current data.
-      onSession: () => buildMcpServer(buildTools(store, refresh: refresh)),
-      bearerToken: token,
-    );
     mcpPort = await transport.start();
     await writeDiscoveryFile(mcpPort);
   } catch (e) {
@@ -63,8 +63,13 @@ Future<AppResources> bootstrap() async {
     pickDirectory: () => FilePicker.platform.getDirectoryPath(),
     mcpPort: mcpPort,
     mcpError: mcpError,
+    mcpKeys: McpKeyOps(
+      list: store.apiKeys,
+      create: (name) => mintApiKey(store, name),
+      revoke: store.revokeApiKey,
+    ),
     shutdown: () async {
-      await transport?.stop();
+      await transport.stop();
       net.close();
       store.close();
     },

@@ -1,3 +1,4 @@
+import '../api_keys.dart';
 import '../net.dart';
 import '../refresh.dart';
 import '../secrets.dart';
@@ -29,6 +30,15 @@ Future<AppResources> bootstrap() async {
     net: net,
     refresh: refresh,
     isWeb: true,
+    // Backed by the local store like everything else here; the settings
+    // pane hides the MCP section on web, so these never run — but they are
+    // real operations, not stubs, and the server-mode client will replace
+    // them with REST-backed ones.
+    mcpKeys: McpKeyOps(
+      list: store.apiKeys,
+      create: (name) => mintApiKey(store, name),
+      revoke: store.revokeApiKey,
+    ),
     shutdown: () async {
       net.close();
       store.close();

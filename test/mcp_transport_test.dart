@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:deptracker/api_keys.dart';
 import 'package:deptracker/mcp/protocol.dart';
 import 'package:deptracker/mcp/tools.dart';
 import 'package:deptracker/mcp/transport.dart';
+import 'package:deptracker/store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
@@ -11,8 +13,17 @@ import 'mcp_client.dart';
 
 const token = 'test-token-0123456789abcdef';
 
+late Store keyStore;
 late McpTransport transport;
 late Uri endpoint;
+
+/// A store holding [token]'s hash, so the const test token authenticates
+/// through the same path a minted key would.
+Store storeAccepting(String key, {String name = 'test-agent'}) {
+  final s = Store.openInMemory();
+  s.insertApiKey(name, hashApiKey(key));
+  return s;
+}
 
 Future<http.Response> post(
   Object body, {
@@ -32,6 +43,7 @@ Future<http.Response> post(
 void main() {
   transportFailureTests();
   setUp(() async {
+    keyStore = storeAccepting(token);
     transport = McpTransport(
       onSession: () => buildMcpServer([
         ToolDef(
@@ -44,13 +56,16 @@ void main() {
           handler: (args) async => {'ok': true},
         ),
       ]),
-      bearerToken: token,
+      authenticate: (k) => authenticateApiKey(keyStore, k),
     );
     final port = await transport.start();
     endpoint = Uri.parse('http://127.0.0.1:$port$mcpPath');
   });
 
-  tearDown(() => transport.stop());
+  tearDown(() async {
+    await transport.stop();
+    keyStore.close();
+  });
 
   group('binding', () {
     test(
@@ -106,6 +121,34 @@ void main() {
 
     test('rejects a wrong token with 401', () async {
       final r = await post(rpc('ping'), bearer: 'wrong-token-aaaaaaaaaaaaaaa');
+      expect(r.statusCode, 401);
+    });
+
+    test('a revoked key stops authenticating without a restart', () async {
+      final ok = await post(
+        rpc(
+          'initialize',
+          params: {
+            'protocolVersion': mcpProtocolVersion,
+            'capabilities': <String, Object?>{},
+            'clientInfo': {'name': 'test', 'version': '1'},
+          },
+        ),
+      );
+      expect(ok.statusCode, 200);
+
+      keyStore.revokeApiKey(keyStore.apiKeys().single.id);
+      final r = await post(rpc('ping'));
+      expect(r.statusCode, 401);
+    });
+
+    test('a JWT-shaped credential is not an API key', () async {
+      // Guards the /api vs /mcp boundary: a web session token must never
+      // open the agent door.
+      final r = await post(
+        rpc('ping'),
+        bearer: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOjF9.c2lnbmF0dXJl',
+      );
       expect(r.statusCode, 401);
     });
 
@@ -354,7 +397,7 @@ void main() {
     test('a session is dropped once it goes idle', () async {
       final idle = McpTransport(
         onSession: () => buildMcpServer(const []),
-        bearerToken: token,
+        authenticate: (k) => authenticateApiKey(keyStore, k),
         idleTimeout: const Duration(milliseconds: 50),
       );
       final port = await idle.start();
@@ -418,9 +461,11 @@ void transportFailureTests() {
     () async {
       // buildMcpServer runs per session and touches the Store; if it throws,
       // the client must get an answer rather than a connection reset.
+      final brokenStore = storeAccepting(token);
+      addTearDown(brokenStore.close);
       final broken = McpTransport(
         onSession: () => throw StateError('session factory exploded'),
-        bearerToken: token,
+        authenticate: (k) => authenticateApiKey(brokenStore, k),
       );
       final port = await broken.start();
       addTearDown(broken.stop);

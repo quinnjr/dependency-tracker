@@ -63,6 +63,7 @@ class _TrackerAppState extends State<TrackerApp> {
           secrets: r.secrets,
           pickDirectory: r.pickDirectory,
           onScan: r.onScan,
+          mcpKeys: r.mcpKeys,
           mcpPort: r.mcpPort,
           mcpError: r.mcpError,
           isWeb: r.isWeb,

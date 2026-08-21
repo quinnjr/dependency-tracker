@@ -47,47 +47,6 @@ void main() {
     expect(await s.githubToken(), isNull);
   });
 
-  test('mcp token is generated on first read and then stable', () async {
-    final s = Secrets(MemorySecretBackend());
-    final first = await s.mcpToken();
-    expect(first, isNotEmpty);
-    expect(await s.mcpToken(), first);
-  });
-
-  test('mcp token is long enough to resist guessing', () async {
-    final s = Secrets(MemorySecretBackend());
-    final token = await s.mcpToken();
-    // 32 random bytes, base64url without padding.
-    expect(token.length, greaterThanOrEqualTo(43));
-  });
-
-  test(
-    'mcp token is url-safe so it survives a header and a config file',
-    () async {
-      final s = Secrets(MemorySecretBackend());
-      expect(await s.mcpToken(), matches(RegExp(r'^[A-Za-z0-9_-]+$')));
-    },
-  );
-
-  test('two generated mcp tokens differ', () async {
-    final a = await Secrets(MemorySecretBackend()).mcpToken();
-    final b = await Secrets(MemorySecretBackend()).mcpToken();
-    expect(a, isNot(b));
-  });
-
-  test('mcp token is registered for redaction', () async {
-    final s = Secrets(MemorySecretBackend());
-    final token = await s.mcpToken();
-    expect(redact('Bearer $token'), 'Bearer «redacted»');
-  });
-
-  test('rotating replaces the mcp token', () async {
-    final s = Secrets(MemorySecretBackend());
-    final first = await s.mcpToken();
-    await s.rotateMcpToken();
-    expect(await s.mcpToken(), isNot(first));
-  });
-
   test('a github token shorter than the redaction floor is rejected', () async {
     final backend = MemorySecretBackend();
     final s = Secrets(backend);
@@ -133,7 +92,6 @@ void main() {
 
   test('a backend failure surfaces as KeyringUnavailable', () async {
     final s = Secrets(FailingSecretBackend());
-    await expectLater(s.mcpToken(), throwsA(isA<KeyringUnavailable>()));
     await expectLater(s.githubToken(), throwsA(isA<KeyringUnavailable>()));
   });
 

@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../api_keys.dart';
+import '../bootstrap/app_resources.dart';
 import '../mcp/endpoint.dart';
 import '../models.dart';
 import '../redact.dart';
@@ -28,6 +30,7 @@ class SettingsPane extends StatefulWidget {
     required this.secrets,
     required this.pickDirectory,
     required this.onScan,
+    required this.mcpKeys,
     required this.mcpPort,
     this.mcpError,
     this.isWeb = false,
@@ -40,6 +43,11 @@ class SettingsPane extends StatefulWidget {
   final Secrets secrets;
   final Future<String?> Function()? pickDirectory;
   final Future<ScanResult> Function()? onScan;
+
+  /// List/create/revoke for the MCP API keys the transport authenticates
+  /// against — injected so web can back them with REST.
+  final McpKeyOps mcpKeys;
+
   final int? mcpPort;
 
   /// Non-null when the MCP server could not start — most often no keyring.
@@ -53,12 +61,18 @@ class SettingsPane extends StatefulWidget {
 
 class _SettingsPaneState extends State<SettingsPane> {
   final _patController = TextEditingController();
+  final _keyNameController = TextEditingController();
   String? _scanSummary;
   var _scanning = false;
   var _hasStoredPat = false;
-  String? _revealedToken;
   String? _patStatus;
   var _patStatusIsError = false;
+
+  /// The key minted by the most recent "Create key" tap. Held only until the
+  /// next mint (or pane rebuild from scratch): the hash in the store is all
+  /// that survives, so this is genuinely the one chance to copy it.
+  MintedKey? _justMinted;
+  String? _keyError;
 
   @override
   void initState() {
@@ -69,6 +83,7 @@ class _SettingsPaneState extends State<SettingsPane> {
   @override
   void dispose() {
     _patController.dispose();
+    _keyNameController.dispose();
     super.dispose();
   }
 
@@ -135,16 +150,119 @@ class _SettingsPaneState extends State<SettingsPane> {
     }
   }
 
-  Future<void> _revealToken() async {
-    final token = await widget.secrets.mcpToken();
-    if (mounted) setState(() => _revealedToken = token);
+  void _createKey() {
+    final name = _keyNameController.text.trim();
+    if (name.isEmpty) {
+      setState(() => _keyError = 'Name the key first — e.g. "claude-code".');
+      return;
+    }
+    try {
+      final minted = widget.mcpKeys.create(name);
+      _keyNameController.clear();
+      setState(() {
+        _justMinted = minted;
+        _keyError = null;
+      });
+    } catch (e) {
+      // The one expected failure is a duplicate name (UNIQUE on api_key).
+      setState(() => _keyError = redact(e.toString()));
+    }
   }
 
-  /// Rotation invalidates every existing MCP client's saved bearer token, so
-  /// this only ever runs from an explicit tap, never automatically.
-  Future<void> _rotateToken() async {
-    await widget.secrets.rotateMcpToken();
-    await _revealToken();
+  void _revokeKey(int id) {
+    widget.mcpKeys.revoke(id);
+    setState(() {
+      // A revoked key's show-once box must not linger: the key it shows no
+      // longer authenticates anything.
+      if (_justMinted?.id == id) _justMinted = null;
+    });
+  }
+
+  /// The API-key manager rows: existing keys, the show-once box for a key
+  /// minted this session, and the name-plus-create row.
+  List<Widget> _keyManager(DriftTokens t, TextStyle body) {
+    String stamp(DateTime d) =>
+        '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    final keys = widget.mcpKeys.list();
+    return [
+      if (keys.isEmpty)
+        Text(
+          'No keys yet — agents cannot connect until one exists.',
+          style: body,
+        )
+      else
+        for (final k in keys)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${k.name} — created ${stamp(k.createdAt)}, last used '
+                    '${k.lastUsedAt == null ? 'never' : stamp(k.lastUsedAt!)}',
+                    overflow: TextOverflow.ellipsis,
+                    style: monoStyle(color: t.ink, size: 12.5),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, size: 17),
+                  tooltip: 'Revoke',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => _revokeKey(k.id),
+                ),
+              ],
+            ),
+          ),
+      if (_justMinted != null) ...[
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            Expanded(
+              child: SelectableText(
+                _justMinted!.key,
+                style: monoStyle(color: t.ink, size: 12.5),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.copy, size: 17),
+              tooltip: 'Copy',
+              onPressed: () =>
+                  Clipboard.setData(ClipboardData(text: _justMinted!.key)),
+            ),
+          ],
+        ),
+        Text('Copy it now — it cannot be shown again.', style: body),
+      ],
+      const SizedBox(height: 8),
+      Row(
+        children: [
+          Expanded(
+            child: TextField(
+              key: const Key('mcp-key-name'),
+              controller: _keyNameController,
+              style: monoStyle(color: t.ink, size: 13),
+              decoration: const InputDecoration(
+                labelText: 'New key name',
+                hintText: 'e.g. claude-code',
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton(
+            onPressed: _createKey,
+            child: const Text('Create key'),
+          ),
+        ],
+      ),
+      if (_keyError != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+            _keyError!,
+            style: TextStyle(fontSize: 12.5, height: 1.4, color: t.behind),
+          ),
+        ),
+    ];
   }
 
   @override
@@ -314,42 +432,12 @@ class _SettingsPaneState extends State<SettingsPane> {
                 Text('Loopback only.', style: body),
                 const SizedBox(height: 9),
                 Text(
-                  'Paste the bearer token into your MCP client config. It lives '
-                  'in the host keyring, so this is the only place to read it.',
+                  'Agents authenticate with an API key. Each key is shown '
+                  'once, when it is created — only a hash is kept.',
                   style: body,
                 ),
                 const SizedBox(height: 8),
-                if (_revealedToken == null)
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton(
-                      onPressed: _revealToken,
-                      child: const Text('Reveal token'),
-                    ),
-                  )
-                else
-                  Row(
-                    children: [
-                      Expanded(
-                        child: SelectableText(
-                          _revealedToken!,
-                          style: monoStyle(color: t.ink, size: 12.5),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.copy, size: 17),
-                        tooltip: 'Copy',
-                        onPressed: () => Clipboard.setData(
-                          ClipboardData(text: _revealedToken!),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.refresh, size: 17),
-                        tooltip: 'Rotate token — invalidates the current one',
-                        onPressed: _rotateToken,
-                      ),
-                    ],
-                  ),
+                ..._keyManager(t, body),
               ] else
                 Text('Starting…', style: body),
             ],

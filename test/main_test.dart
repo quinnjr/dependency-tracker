@@ -3,6 +3,7 @@
 // a test. `main()` itself stays untestable (it opens the real database, talks
 // to the real keyring, and binds a port), but everything it assembles is
 // injectable and is covered here.
+import 'package:deptracker/api_keys.dart';
 import 'package:deptracker/bootstrap/app_resources.dart';
 import 'package:deptracker/main.dart';
 import 'package:deptracker/models.dart';
@@ -38,6 +39,11 @@ Widget subject({int? mcpPort = 51234, Object? mcpError, bool isWeb = false}) =>
                 depsFound: 0,
                 errors: [],
               ),
+        mcpKeys: McpKeyOps(
+          list: store.apiKeys,
+          create: (name) => mintApiKey(store, name),
+          revoke: store.revokeApiKey,
+        ),
         mcpPort: mcpPort,
         mcpError: mcpError,
         isWeb: isWeb,

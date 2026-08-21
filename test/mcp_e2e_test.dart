@@ -10,6 +10,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:deptracker/api_keys.dart';
 import 'package:deptracker/mcp/protocol.dart';
 import 'package:deptracker/mcp/tools.dart';
 import 'package:deptracker/mcp/transport.dart';
@@ -54,9 +55,12 @@ Future<http.Response> _post(
 void main() {
   setUp(() async {
     store = Store.openInMemory();
+    // The e2e stack authenticates the same way main.dart wires it: an API
+    // key whose hash lives in the same store the tools mutate.
+    store.insertApiKey('e2e-agent', hashApiKey(_token));
     transport = McpTransport(
       onSession: () => buildMcpServer(buildTools(store, refresh: _noopRefresh)),
-      bearerToken: _token,
+      authenticate: (k) => authenticateApiKey(store, k),
     );
     final port = await transport.start();
     endpoint = Uri.parse('http://127.0.0.1:$port$mcpPath');
