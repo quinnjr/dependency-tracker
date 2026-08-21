@@ -42,6 +42,7 @@ dependencies:
   mcp_sse_server: ^0.2.1
   cupertino_icons: ^1.0.9
   crypto: ^3.0.7
+  cryptography: ^2.9.0
 
 dev_dependencies:
   flutter_test:

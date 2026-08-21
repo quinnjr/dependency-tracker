@@ -185,6 +185,11 @@ class Store extends ChangeNotifier implements EtagCache {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS secret (
+        key TEXT PRIMARY KEY,
+        nonce BLOB NOT NULL,
+        ciphertext BLOB NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS usage_by_project ON usage(project_path);
       CREATE INDEX IF NOT EXISTS release_by_watch ON release(watch_id);
     ''');
@@ -978,6 +983,34 @@ class Store extends ChangeNotifier implements EtagCache {
     ]);
     notifyListeners();
   }
+
+  // `secret` follows the same exemption as `meta`/`http_cache`: server
+  // bookkeeping the UI never renders, so its mutators do not notify. The
+  // rows are AES-GCM ciphertext produced by SqliteSecretBackend
+  // (lib/server/sqlite_secrets.dart); the Store never sees a plaintext
+  // secret, which keeps the "never passed to Store" rule intact.
+
+  void secretPut(String key, List<int> nonce, List<int> ciphertext) =>
+      _db.execute(
+        'INSERT OR REPLACE INTO secret (key, nonce, ciphertext) '
+        'VALUES (?, ?, ?)',
+        [key, Uint8List.fromList(nonce), Uint8List.fromList(ciphertext)],
+      );
+
+  ({List<int> nonce, List<int> ciphertext})? secretGet(String key) {
+    final rows = _db.select(
+      'SELECT nonce, ciphertext FROM secret WHERE key = ?',
+      [key],
+    );
+    if (rows.isEmpty) return null;
+    return (
+      nonce: rows.first['nonce'] as List<int>,
+      ciphertext: rows.first['ciphertext'] as List<int>,
+    );
+  }
+
+  void secretDelete(String key) =>
+      _db.execute('DELETE FROM secret WHERE key = ?', [key]);
 
   @override
   String? etagFor(String url) {
