@@ -892,6 +892,86 @@ class Store extends ChangeNotifier implements EtagCache {
       .map((r) => r['project_path'] as String)
       .toList();
 
+  // --- snapshot ----------------------------------------------------------------
+  //
+  // The sync protocol between the server and the browser's mirror Store:
+  // the server exports, the client imports. Only the four UI tables travel
+  // — secrets, users, refresh tokens, API keys, and the HTTP cache stay
+  // server-side by construction, not by filtering at the HTTP layer.
+
+  static const List<String> _snapshotTables = [
+    'watch',
+    'usage',
+    'release',
+    'scan_root',
+  ];
+
+  Map<String, Object?> exportSnapshot() => {
+    'revision': revision(),
+    for (final table in _snapshotTables)
+      table: _db
+          .select('SELECT * FROM $table')
+          .map(Map<String, Object?>.from)
+          .toList(),
+  };
+
+  /// Client-side hydration: replaces the four UI tables with exactly what
+  /// [snapshot] holds, ids included, in one transaction and one
+  /// notification. Column names are read from the rows themselves — they
+  /// come from this app's own [exportSnapshot] over the same schema, not
+  /// from attacker input, and the mirror this feeds is an in-memory,
+  /// disposable database.
+  void importSnapshot(Map<String, Object?> snapshot) {
+    runInTransaction(() {
+      // Children before parents, so ON DELETE CASCADE never fires against
+      // rows the snapshot is about to re-create.
+      for (final table in ['usage', 'release', 'watch', 'scan_root']) {
+        _db.execute('DELETE FROM $table');
+      }
+      for (final table in _snapshotTables) {
+        final rows = (snapshot[table] as List? ?? const [])
+            .cast<Map<String, Object?>>();
+        if (rows.isEmpty) continue;
+        final cols = rows.first.keys.toList();
+        final stmt = _db.prepare(
+          'INSERT INTO $table (${cols.join(', ')}) '
+          'VALUES (${List.filled(cols.length, '?').join(', ')})',
+        );
+        try {
+          for (final row in rows) {
+            stmt.execute([for (final c in cols) row[c]]);
+          }
+        } finally {
+          stmt.dispose();
+        }
+      }
+      // Not metaSet: that notifies on its own, and this import owes its
+      // listeners exactly one notification, after COMMIT.
+      final rev = snapshot['revision'];
+      if (rev is int) {
+        _db.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
+          'revision',
+          '$rev',
+        ]);
+      }
+    });
+    _deferOrNotify();
+  }
+
+  /// Monotonic change counter for the snapshot protocol. Bumped by the
+  /// server on every mutation; does not notify (the mutator that bumped it
+  /// already does).
+  int bumpRevision() {
+    final next = revision() + 1;
+    _db.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
+      'revision',
+      '$next',
+    ]);
+    return next;
+  }
+
+  int revision() => int.tryParse(metaGet('revision') ?? '') ?? 0;
+
   // --- api keys ----------------------------------------------------------------
   //
   // Named MCP API keys, stored hash-only (see lib/api_keys.dart for minting

@@ -411,6 +411,72 @@ void main() {
     },
   );
 
+  group('snapshot', () {
+    test('exportSnapshot carries exactly the four UI tables plus revision', () {
+      final id = store.upsertWatch(WatchKind.pub, 'http');
+      store.replaceUsagesForProject('/r/one', 'pubspec.lock', [
+        _usage(id, '/r/one'),
+      ]);
+      store.insertReleases(id, [Release(watchId: id, version: '1.1.0')]);
+      store.addScanRoot('/r');
+      // Rows that must NOT travel: secrets, users, keys, cache.
+      store.secretPut('gh', [1, 2, 3], [4, 5, 6]);
+      store.insertUser('owner', 'argon2id\$x\$y', 'admin');
+      store.insertApiKey('agent', 'somehash');
+      store.putCache('https://x', 'W/"e"', '{}');
+
+      final snap = store.exportSnapshot();
+      expect(snap.keys.toSet(), {
+        'revision',
+        'watch',
+        'usage',
+        'release',
+        'scan_root',
+      });
+    });
+
+    test('importSnapshot makes a second store identical, in one '
+        'notification', () {
+      final id = store.upsertWatch(WatchKind.pub, 'http');
+      store.upsertWatch(WatchKind.npm, 'left-pad');
+      store.replaceUsagesForProject('/r/one', 'pubspec.lock', [
+        _usage(id, '/r/one'),
+      ]);
+      store.insertReleases(id, [Release(watchId: id, version: '1.1.0')]);
+      store.addScanRoot('/r');
+
+      final b = Store.openInMemory();
+      addTearDown(b.close);
+      var notified = 0;
+      b.addListener(() => notified++);
+      b.importSnapshot(store.exportSnapshot());
+
+      expect(notified, 1);
+      expect(
+        b.watches().map((w) => w.id).toList(),
+        store.watches().map((w) => w.id).toList(),
+      );
+      expect(b.usagesFor(id).single.projectPath, '/r/one');
+      expect(b.releasesFor(id).single.version, '1.1.0');
+      expect(b.scanRoots(), ['/r']);
+    });
+
+    test('importSnapshot replaces, not merges', () {
+      final b = Store.openInMemory();
+      addTearDown(b.close);
+      b.upsertWatch(WatchKind.crates, 'serde');
+      b.importSnapshot(store.exportSnapshot());
+      expect(b.watches(), isEmpty);
+    });
+
+    test('bumpRevision is monotonic and rides along in the export', () {
+      final r1 = store.bumpRevision();
+      expect(store.bumpRevision(), r1 + 1);
+      expect(store.revision(), r1 + 1);
+      expect(store.exportSnapshot()['revision'], r1 + 1);
+    });
+  });
+
   test('mutations notify listeners', () {
     var notified = 0;
     store.addListener(() => notified++);
