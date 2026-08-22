@@ -49,4 +49,25 @@ void main() {
     final minted = mintApiKey(store, 'a');
     expect(redact('bearer ${minted.key} failed'), 'bearer «redacted» failed');
   });
+
+  group('randomToken (the shape the old mcpToken tests guarded)', () {
+    test('is long enough to resist guessing', () {
+      // 32 random bytes, base64url without padding.
+      expect(randomToken().length, greaterThanOrEqualTo(43));
+    });
+
+    test('is url-safe so it survives a header and a config file', () {
+      expect(randomToken(), matches(RegExp(r'^[A-Za-z0-9_-]+$')));
+    });
+
+    test('two tokens differ', () {
+      expect(randomToken(), isNot(randomToken()));
+    });
+
+    test('the byte count scales the length', () {
+      // A shorter token would be a regression the mint/refresh callers rely
+      // on not happening.
+      expect(randomToken(8).length, lessThan(randomToken(32).length));
+    });
+  });
 }

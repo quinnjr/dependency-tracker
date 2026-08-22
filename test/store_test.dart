@@ -516,6 +516,34 @@ void main() {
         expect(ahead.watches(), isEmpty);
       },
     );
+
+    test('a lower revision from a different generation still applies '
+        '(server reset/restore does not freeze the mirror)', () {
+      final ahead = Store.openInMemory();
+      addTearDown(ahead.close);
+      Map<String, Object?> snap(int rev, String gen) => {
+        'revision': rev,
+        'generation': gen,
+        'watch': <Map<String, Object?>>[],
+        'usage': <Map<String, Object?>>[],
+        'release': <Map<String, Object?>>[],
+        'scan_root': <Map<String, Object?>>[],
+      };
+
+      // Hydrated to revision 50 of server generation A.
+      ahead.upsertWatch(WatchKind.pub, 'stale');
+      expect(ahead.importSnapshot(snap(50, 'gen-A')), isTrue);
+
+      // A stale in-flight response from the SAME generation is still dropped.
+      expect(ahead.importSnapshot(snap(40, 'gen-A')), isFalse);
+
+      // But the server restarts/restores: generation B, revision reset to 12.
+      // Lower number, different timeline — it must apply, not freeze.
+      expect(ahead.importSnapshot(snap(12, 'gen-B')), isTrue);
+      expect(ahead.revision(), 12);
+      // And now generation-B staleness is judged against 12.
+      expect(ahead.importSnapshot(snap(11, 'gen-B')), isFalse);
+    });
   });
 
   test('mutations notify listeners', () {

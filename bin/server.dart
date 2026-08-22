@@ -92,15 +92,16 @@ Future<void> main(List<String> args) async {
     final username = (addUser ?? resetPassword)!;
     final password = _promptPassword();
     if (addUser != null) {
-      // The CLI outranks the network by construction: it has the disk, so
-      // it may create accounts even while registration is closed.
-      final wasOpen = auth.registrationOpen;
-      if (!wasOpen) auth.setRegistrationOpen(true, byRole: 'admin');
+      // The CLI outranks the network by construction: it has the disk, so it
+      // creates accounts directly, without touching the registration flag —
+      // flipping that global open for the hash would briefly open
+      // registration to the network on a live server sharing this database.
       try {
-        final result = await auth.register(username, password);
-        stdout.writeln('created ${result!.role} account "$username"');
-      } finally {
-        if (!wasOpen) auth.setRegistrationOpen(false, byRole: 'admin');
+        final role = await auth.createAccount(username, password);
+        stdout.writeln('created $role account "$username"');
+      } on UsernameTaken {
+        stderr.writeln('an account named "$username" already exists');
+        exit(1);
       }
     } else {
       final ok = await auth.resetPassword(username, password);
@@ -117,10 +118,13 @@ Future<void> main(List<String> args) async {
   final secrets = Secrets(SqliteSecretBackend(store, keys.aesKey));
   final net = Net(cache: store);
 
+  // githubTokenOrNull, not githubToken: a corrupt or rotated key file makes
+  // the decrypt throw, and an optional token must not turn every refresh
+  // into a 500 telling a headless operator to start gnome-keyring.
   Future<RefreshReport> refresh(int? watchId) async => refreshAll(
     store,
     net,
-    token: await secrets.githubToken(),
+    token: await secrets.githubTokenOrNull(),
     onlyWatchId: watchId,
   );
 

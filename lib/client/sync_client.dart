@@ -100,16 +100,24 @@ class SyncClient implements AuthController {
     String username,
     String password,
   ) async {
-    final r = await _http.post(
-      base.resolve(path),
-      headers: {'content-type': 'application/json'},
-      body: jsonEncode({'username': username, 'password': password}),
-    );
+    final http.Response r;
+    try {
+      r = await _http.post(
+        base.resolve(path),
+        headers: {'content-type': 'application/json'},
+        body: jsonEncode({'username': username, 'password': password}),
+      );
+    } catch (_) {
+      // An unreachable server must return an error string, not throw into
+      // the login form (whose _submit has no catch and would wedge the
+      // button permanently disabled).
+      return 'could not reach the server';
+    }
     if (r.statusCode != 200) {
       final body = _tryJson(r.body);
       return '${body?['error'] ?? 'sign-in failed (${r.statusCode})'}';
     }
-    _adoptSession(jsonDecode(r.body) as Map);
+    _adoptSession((_tryJson(r.body) ?? const {}).cast<String, Object?>());
     _username = username.trim().toLowerCase();
     await hydrate();
     await refreshStatus();
@@ -119,7 +127,15 @@ class SyncClient implements AuthController {
 
   @override
   Future<void> logout() async {
-    await _http.post(base.resolve('api/auth/logout'));
+    // Clear the local session unconditionally: signing out must take effect
+    // even if the server is unreachable (the refresh token still expires on
+    // its own), and the button that fires this discards the Future, so a
+    // thrown POST would be an uncaught error that also leaves you logged in.
+    try {
+      await _http.post(base.resolve('api/auth/logout'));
+    } catch (_) {
+      // Best-effort revocation; the local clear below is what matters.
+    }
     _jwt = null;
     _username = null;
     _role = null;
@@ -129,8 +145,19 @@ class SyncClient implements AuthController {
 
   @override
   Future<void> setRegistrationOpen(bool open) async {
-    await _send('PUT', 'api/auth/registration', body: {'enabled': open});
-    _registrationOpen = open;
+    // Adopt the new value only if the server accepted it (_send returns null
+    // on any failure); otherwise re-sync from status so the toggle never
+    // shows a state the server rejected.
+    final result = await _send(
+      'PUT',
+      'api/auth/registration',
+      body: {'enabled': open},
+    );
+    if (result != null) {
+      _registrationOpen = open;
+    } else {
+      await refreshStatus();
+    }
     changes.notifyListeners();
   }
 
@@ -227,12 +254,15 @@ class SyncClient implements AuthController {
   }
 
   /// Fire-and-forget mutation: apply the snapshot on success, record the
-  /// failure on the banner otherwise. `_send` (orThrow:false) never throws —
-  /// it maps every failure, transport errors included, to a null result and
-  /// a `syncError` — so the button always resolves to either a mirror
-  /// update or a visible message, never a dropped async error.
+  /// failure on the banner otherwise. `_send` (orThrow:false) never throws,
+  /// but applying the returned snapshot can (schema drift between a cached
+  /// build and a newer server), so the `catchError` keeps that from becoming
+  /// an unobserved async rejection — the button always resolves to a mirror
+  /// update or a visible message.
   void _mutate(String method, String path, {Object? body}) {
-    _send(method, path, body: body).then(_applySnapshot);
+    _send(method, path, body: body).then(_applySnapshot).catchError((Object e) {
+      syncError.value = 'could not apply the server response';
+    });
   }
 
   void _applySnapshot(Map<String, Object?>? body) {
@@ -291,13 +321,24 @@ class SyncClient implements AuthController {
       return null;
     }
 
-    if (r.statusCode == 401 && !retried) {
-      // Only the first racing caller actually refreshes; the rest await the
-      // same Future, so the rotating token is spent exactly once.
-      if (await _refreshSession()) {
-        return _send(method, path, body: body, orThrow: orThrow, retried: true);
+    if (r.statusCode == 401) {
+      if (!retried) {
+        // Only the first racing caller actually refreshes; the rest await
+        // the same Future, so the rotating token is spent exactly once.
+        if (await _refreshSession()) {
+          return _send(
+            method,
+            path,
+            body: body,
+            orThrow: orThrow,
+            retried: true,
+          );
+        }
       }
-      // The session is genuinely over; the gate widget listens for this.
+      // Either the refresh failed, or the retry with a fresh token still got
+      // a 401 (signing-key rotation, clock skew) — the session is genuinely
+      // over. Clear it so the gate widget returns to the login screen rather
+      // than leaving the app up on a dead token.
       _jwt = null;
       changes.notifyListeners();
     }

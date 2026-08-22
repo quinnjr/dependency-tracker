@@ -947,14 +947,21 @@ class Store extends StoreListenable implements EtagCache {
   /// from attacker input, and the mirror this feeds is an in-memory,
   /// disposable database.
   ///
-  /// Server revisions only ever increase, so a snapshot whose revision is
-  /// older than what the mirror already holds is a response that overtook a
-  /// newer one in flight — applying it would roll the user's own change
-  /// backward. Such a snapshot is dropped; the newer state already applied
-  /// stands. Returns whether the snapshot was applied.
+  /// Within one server run the revision only increases, so a snapshot whose
+  /// revision is older than what the mirror already holds is a response that
+  /// overtook a newer one in flight — applying it would roll the user's own
+  /// change backward, so it is dropped. But a snapshot carrying a different
+  /// `generation` than the mirror last saw comes from a server that
+  /// restarted or was restored from a backup, resetting its revision counter
+  /// — there the lower number *is* the current truth and must be applied,
+  /// or an open tab would freeze on stale state forever. Returns whether the
+  /// snapshot was applied.
   bool importSnapshot(Map<String, Object?> snapshot) {
     final incoming = snapshot['revision'];
-    if (incoming is int && incoming < revision()) return false;
+    final incomingGen = snapshot['generation'];
+    final sameTimeline =
+        incomingGen is! String || incomingGen == metaGet('generation');
+    if (sameTimeline && incoming is int && incoming < revision()) return false;
     runInTransaction(() {
       // Children before parents, so ON DELETE CASCADE never fires against
       // rows the snapshot is about to re-create.
@@ -980,11 +987,16 @@ class Store extends StoreListenable implements EtagCache {
       }
       // Not metaSet: that notifies on its own, and this import owes its
       // listeners exactly one notification, after COMMIT.
-      final rev = snapshot['revision'];
-      if (rev is int) {
+      if (incoming is int) {
         _db.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
           'revision',
-          '$rev',
+          '$incoming',
+        ]);
+      }
+      if (incomingGen is String) {
+        _db.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
+          'generation',
+          incomingGen,
         ]);
       }
     });

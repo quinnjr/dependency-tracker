@@ -31,7 +31,7 @@ Future<AppResources> bootstrap() async {
   Future<RefreshReport> refresh(int? watchId) async => refreshAll(
     store,
     net,
-    token: await _githubTokenOrNull(secrets),
+    token: await secrets.githubTokenOrNull(),
     onlyWatchId: watchId,
   );
 
@@ -72,16 +72,6 @@ Future<AppResources> bootstrap() async {
       store.close();
     },
   );
-}
-
-/// A missing keyring must not cost the optional GitHub PAT path: a refresh
-/// with no token simply falls back to public Atom feeds for release notes.
-Future<String?> _githubTokenOrNull(Secrets secrets) async {
-  try {
-    return await secrets.githubToken();
-  } on KeyringUnavailable {
-    return null;
-  }
 }
 
 // coverage:ignore-end

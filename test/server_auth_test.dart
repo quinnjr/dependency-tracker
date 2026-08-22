@@ -147,6 +147,40 @@ void main() {
       },
     );
 
+    test('concurrent first-registrations do not both become admin', () async {
+      // Both start before either inserts; the role is decided at insert time
+      // (after the hash await), so exactly one ends up admin.
+      final results = await Future.wait([
+        auth.register('alice', 'password-alice'),
+        auth.register('bob', 'password-bob'),
+      ]);
+      final roles = results.map((r) => r!.role).toList()..sort();
+      expect(roles, ['admin', 'member']);
+    });
+
+    test(
+      'createAccount bypasses closed registration without touching the flag',
+      () async {
+        await auth.register('owner', 'a-strong-password'); // first = admin
+        auth.setRegistrationOpen(false, byRole: 'admin');
+        expect(await auth.createAccount('cli', 'password-cli'), 'member');
+        // Registration stays closed the whole time — no flag flip window.
+        expect(auth.registrationOpen, isFalse);
+        await expectLater(
+          auth.register('web', 'password-web'),
+          throwsA(isA<RegistrationClosed>()),
+        );
+      },
+    );
+
+    test('createAccount refuses a duplicate name', () async {
+      await auth.createAccount('owner', 'a-strong-password');
+      await expectLater(
+        auth.createAccount('owner', 'another-password'),
+        throwsA(isA<UsernameTaken>()),
+      );
+    });
+
     test(
       'refresh rotates: old token dead on second use, new one works',
       () async {

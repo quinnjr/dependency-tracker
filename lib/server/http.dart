@@ -56,6 +56,12 @@ class AppServer {
 
   HttpServer? _http;
 
+  /// A per-process id stamped into every snapshot, so a client can tell a
+  /// restart or a restored-backup (revision counter reset) apart from a
+  /// stale in-flight response and not freeze on old state. In memory only:
+  /// it deliberately changes on every server start.
+  final String _generation = randomToken(8);
+
   int? get port => _http?.port;
 
   Future<int> start() async {
@@ -138,9 +144,7 @@ class AppServer {
           await response.close();
           return;
         }
-        await _json(response, HttpStatus.ok, {
-          'snapshot': store.exportSnapshot(),
-        });
+        await _json(response, HttpStatus.ok, {'snapshot': _snapshot()});
 
       case ('POST', ['watches']):
         final body = await _body(request);
@@ -195,7 +199,7 @@ class AppServer {
         await _mutated(response, extra: {'report': report.toJson()});
 
       case ('POST', ['scan']):
-        if (!_requireAdmin(claims, response)) return;
+        if (!await _requireAdmin(claims, response)) return;
         final result = await _scan();
         await _mutated(response, extra: {'result': result.toJson()});
 
@@ -203,7 +207,7 @@ class AppServer {
         // Scan roots are server filesystem paths and scanning walks them —
         // arbitrary-path filesystem access is an admin power, not a
         // member's shared-watchlist power.
-        if (!_requireAdmin(claims, response)) return;
+        if (!await _requireAdmin(claims, response)) return;
         final path = (await _body(request))['path'];
         if (path is! String || path.trim().isEmpty) {
           await _badRequest(response, 'path is required');
@@ -213,7 +217,7 @@ class AppServer {
         await _mutated(response);
 
       case ('DELETE', ['scan-roots']):
-        if (!_requireAdmin(claims, response)) return;
+        if (!await _requireAdmin(claims, response)) return;
         final path = (await _body(request))['path'];
         if (path is! String) {
           await _badRequest(response, 'path is required');
@@ -224,7 +228,7 @@ class AppServer {
 
       case ('PUT', ['secrets', 'github-token']):
         // The GitHub token is shared org-wide; only an admin replaces it.
-        if (!_requireAdmin(claims, response)) return;
+        if (!await _requireAdmin(claims, response)) return;
         final token = (await _body(request))['token'];
         try {
           await secrets.setGithubToken(token is String ? token : null);
@@ -238,13 +242,13 @@ class AppServer {
       // MCP keys are persistent, server-wide agent credentials; managing
       // them is an admin power.
       case ('GET', ['mcp-keys']):
-        if (!_requireAdmin(claims, response)) return;
+        if (!await _requireAdmin(claims, response)) return;
         await _json(response, HttpStatus.ok, {
           'keys': [for (final k in store.apiKeys()) k.toJson()],
         });
 
       case ('POST', ['mcp-keys']):
-        if (!_requireAdmin(claims, response)) return;
+        if (!await _requireAdmin(claims, response)) return;
         final name = (await _body(request))['name'];
         if (name is! String || name.trim().isEmpty) {
           await _badRequest(response, 'name is required');
@@ -270,7 +274,7 @@ class AppServer {
         });
 
       case ('DELETE', ['mcp-keys', final idText]):
-        if (!_requireAdmin(claims, response)) return;
+        if (!await _requireAdmin(claims, response)) return;
         final id = int.tryParse(idText);
         if (id == null) {
           await _notFound(response);
@@ -286,9 +290,15 @@ class AppServer {
   }
 
   /// Answers 403 and returns false unless [claims] carries the admin role.
-  bool _requireAdmin(Map<String, Object?> claims, HttpResponse response) {
+  /// Async so the 403 write is awaited inside `_handle`'s try/catch rather
+  /// than left as an orphaned Future that rejects uncaught if the socket
+  /// drops mid-flush.
+  Future<bool> _requireAdmin(
+    Map<String, Object?> claims,
+    HttpResponse response,
+  ) async {
     if (claims['role'] == 'admin') return true;
-    _json(response, HttpStatus.forbidden, {'error': 'admin only'});
+    await _json(response, HttpStatus.forbidden, {'error': 'admin only'});
     return false;
   }
 
@@ -326,6 +336,14 @@ class AppServer {
             'error': 'registration is closed',
           });
         } on UsernameTaken {
+          await _json(response, HttpStatus.conflict, {
+            'error': 'that username is taken',
+          });
+        } on SqliteException {
+          // Defense in depth: register's account insert is atomic and
+          // surfaces a taken name as UsernameTaken, so a raw UNIQUE
+          // violation should not reach here — but if one ever does, answer a
+          // clean 409 rather than a 500 leaking the constraint text.
           await _json(response, HttpStatus.conflict, {
             'error': 'that username is taken',
           });
@@ -482,11 +500,15 @@ class AppServer {
     HttpResponse response, {
     Map<String, Object?> extra = const {},
   }) async {
-    await _json(response, HttpStatus.ok, {
-      ...extra,
-      'snapshot': store.exportSnapshot(),
-    });
+    await _json(response, HttpStatus.ok, {...extra, 'snapshot': _snapshot()});
   }
+
+  /// The store's snapshot plus this server's [_generation], the pair the
+  /// client's mirror needs to tell a reset timeline from a stale response.
+  Map<String, Object?> _snapshot() => {
+    ...store.exportSnapshot(),
+    'generation': _generation,
+  };
 
   Future<Map<String, Object?>> _body(HttpRequest request) async {
     final bytes = <int>[];

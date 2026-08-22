@@ -255,4 +255,85 @@ void main() {
       expect(refreshes, 1);
     },
   );
+
+  test(
+    'login against an unreachable server returns an error, not a throw',
+    () async {
+      final down = MockClient(
+        (_) async => throw Exception('connection refused'),
+      );
+      final sync = SyncClient(
+        Uri.parse('http://server/'),
+        mirror,
+        client: down,
+      );
+      final error = await sync.login('joseph', 'whatever');
+      expect(error, isNotNull);
+      expect(sync.authenticated, isFalse);
+    },
+  );
+
+  test(
+    'logout clears the local session even if the server is unreachable',
+    () async {
+      var loggedOutCalls = 0;
+      final client = MockClient((request) async {
+        if (request.url.path == '/api/auth/login') {
+          return http.Response(
+            jsonEncode({'accessToken': 'jwt-1', 'role': 'admin'}),
+            200,
+          );
+        }
+        if (request.url.path == '/api/auth/logout') {
+          loggedOutCalls++;
+          throw Exception('server down');
+        }
+        if (request.url.path == '/api/status') {
+          return http.Response(jsonEncode({'users': 1}), 200);
+        }
+        return http.Response(
+          jsonEncode({'snapshot': serverStore.exportSnapshot()}),
+          200,
+        );
+      });
+      final sync = SyncClient(
+        Uri.parse('http://server/'),
+        mirror,
+        client: client,
+      );
+      await sync.login('joseph', 'password-one');
+      expect(sync.authenticated, isTrue);
+      await sync.logout();
+      expect(loggedOutCalls, 1);
+      expect(
+        sync.authenticated,
+        isFalse,
+        reason: 'cleared despite the failure',
+      );
+    },
+  );
+
+  test('a 401 on the retry (post-refresh) ends the session', () async {
+    // The refresh succeeds but the retried request still 401s (key rotation
+    // / clock skew) — the session must not stay authenticated on a dead JWT.
+    final client = MockClient((request) async {
+      if (request.url.path == '/api/auth/refresh') {
+        return http.Response(
+          jsonEncode({'accessToken': 'jwt-2', 'role': 'member'}),
+          200,
+        );
+      }
+      return http.Response('{"error":"expired"}', 401);
+    });
+    final sync = SyncClient(
+      Uri.parse('http://server/'),
+      mirror,
+      client: client,
+    );
+    var notified = 0;
+    sync.changes.addListener(() => notified++);
+    await sync.hydrate();
+    expect(sync.authenticated, isFalse);
+    expect(notified, greaterThan(0));
+  });
 }

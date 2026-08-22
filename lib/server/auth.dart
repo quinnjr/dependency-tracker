@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:cryptography/helpers.dart' show constantTimeBytesEquality;
 
 import '../api_keys.dart' show hashApiKey, randomToken;
 import '../store.dart';
@@ -58,7 +59,13 @@ class AuthResult {
 class Auth {
   Auth(this._store, List<int> jwtKey, {DateTime Function()? now})
     : _jwtKey = List<int>.from(jwtKey),
-      _now = now ?? DateTime.now;
+      _now = now ?? DateTime.now {
+    // Warm the dummy hash at construction so the *first* unknown-user login
+    // per process doesn't derive it inline — which would make that one probe
+    // run two Argon2id passes (dummy + verify) against a known user's one,
+    // reopening the timing oracle for the first request after a boot.
+    _dummyHashFuture = _hashPassword('a-dummy-password-hashed-for-timing');
+  }
 
   final Store _store;
   final List<int> _jwtKey;
@@ -94,14 +101,37 @@ class Auth {
       throw ArgumentError('username required; password of at least 8 chars');
     }
     if (!registrationOpen) throw RegistrationClosed();
-    // Reject a taken name before hashing, so a UNIQUE violation cannot
-    // escape as a 500 leaking SQL. Registration is inherently an
-    // enumeration surface (the user must be told a name is free), so this
-    // adds no oracle login does not already have to defend against.
+    final id = _insertAccount(name, await _hashPassword(password));
+    // The role is read back from the row just written, so it reflects the
+    // count *at insert time*, not the count observed before the hash await —
+    // otherwise two concurrent first-registrations would both see zero users
+    // across their (suspended) hash and both become admin.
+    return _issue(id, _store.userRoleById(id)!);
+  }
+
+  /// Inserts an account in one synchronous critical section — count check and
+  /// insert with no `await` between — so the first-account-is-admin decision
+  /// cannot straddle an event-loop yield. A duplicate name surfaces as
+  /// [UsernameTaken] rather than a raw SQLite error. Shared by [register] and
+  /// the CLI's [createAccount].
+  int _insertAccount(String name, String passwordHash) {
     if (_store.userByName(name) != null) throw UsernameTaken();
     final role = _store.userCount() == 0 ? 'admin' : 'member';
-    final id = _store.insertUser(name, await _hashPassword(password), role);
-    return _issue(id, role);
+    return _store.insertUser(name, passwordHash, role);
+  }
+
+  /// CLI-only account creation (`bin/server.dart --add-user`). Bypasses the
+  /// registration-open gate without touching the DB-persisted flag — flipping
+  /// that global open for the duration of a hash would briefly open
+  /// registration to the whole network on a live server sharing the database.
+  Future<String> createAccount(String username, String password) async {
+    final name = username.trim().toLowerCase();
+    if (name.isEmpty || password.length < 8) {
+      throw ArgumentError('username required; password of at least 8 chars');
+    }
+    final hash = await _hashPassword(password);
+    final id = _insertAccount(name, hash);
+    return _store.userRoleById(id)!;
   }
 
   /// Null on any failure, with no unknown-user/wrong-password distinction.
@@ -118,13 +148,13 @@ class Auth {
     return _issue(user.id, user.role);
   }
 
-  Future<String>? _dummyHashFuture;
+  /// A well-formed Argon2id hash of a fixed password, derived once at
+  /// construction (see the constructor) and awaited by the unknown-user
+  /// login branch so it costs exactly one verification and no extra
+  /// derivation, even on the first request after a boot.
+  late final Future<String> _dummyHashFuture;
 
-  /// A well-formed Argon2id hash of a fixed password, computed once and
-  /// reused, so the unknown-user login branch costs exactly one
-  /// verification and no extra derivation.
-  Future<String> _dummyHash() =>
-      _dummyHashFuture ??= _hashPassword('a-dummy-password-hashed-for-timing');
+  Future<String> _dummyHash() => _dummyHashFuture;
 
   AuthResult? refresh(String presentedRefreshToken) {
     final hash = hashApiKey(presentedRefreshToken);
@@ -205,16 +235,8 @@ class Auth {
       nonce: salt,
     );
     final bytes = await key.extractBytes();
-    return constantTimeBytesEquals(bytes, base64Url.decode(parts[2]));
+    // package:cryptography's own constant-time comparison, rather than a
+    // third hand-rolled copy to keep timing-safe alongside the library's.
+    return constantTimeBytesEquality.equals(bytes, base64Url.decode(parts[2]));
   }
-}
-
-/// Byte-list twin of the transport's constantTimeEquals.
-bool constantTimeBytesEquals(List<int> a, List<int> b) {
-  if (a.length != b.length) return false;
-  var mismatch = 0;
-  for (var i = 0; i < a.length; i++) {
-    mismatch |= a[i] ^ b[i];
-  }
-  return mismatch == 0;
 }

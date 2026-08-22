@@ -217,7 +217,14 @@ class _SettingsPaneState extends State<SettingsPane> {
   }
 
   Future<void> _revokeKey(int id) async {
-    await widget.mcpKeys.revoke(id);
+    try {
+      await widget.mcpKeys.revoke(id);
+    } catch (e) {
+      // The web revoke goes over REST (orThrow) and can fail; report it
+      // rather than raising an uncaught async error and silently no-opping.
+      if (mounted) setState(() => _keyError = redact(e.toString()));
+      return;
+    }
     if (!mounted) return;
     setState(() {
       // A revoked key's show-once box must not linger: the key it shows no

@@ -77,6 +77,19 @@ class Secrets {
     return (value == null || value.isEmpty) ? null : value;
   }
 
+  /// [githubToken] but tolerant of an unreachable store: returns null rather
+  /// than throwing when the secret cannot be read (no keyring on desktop, a
+  /// corrupt or rotated key file on the server). The token is optional, so a
+  /// refresh should degrade to unauthenticated fetching, not fail wholesale
+  /// with a keyring message.
+  Future<String?> githubTokenOrNull() async {
+    try {
+      return await githubToken();
+    } on SecretStoreUnavailable {
+      return null;
+    }
+  }
+
   /// Whether a GitHub token is stored, without decrypting it — for the
   /// status endpoint, which only needs the boolean.
   Future<bool> hasGithubToken() => _guard(() => _backend.has(_githubKey));
