@@ -23,10 +23,17 @@ class MintedKey {
 
 String hashApiKey(String key) => sha256.convert(utf8.encode(key)).toString();
 
+final _tokenRng = Random.secure();
+
+/// A URL-safe, unpadded token of [bytes] CSPRNG bytes — the shared shape of
+/// both the MCP API key body and the opaque refresh token, so the two are
+/// generated one way rather than three.
+String randomToken([int bytes = 32]) => base64Url
+    .encode(List<int>.generate(bytes, (_) => _tokenRng.nextInt(256)))
+    .replaceAll('=', '');
+
 MintedKey mintApiKey(Store store, String name) {
-  final rng = Random.secure();
-  final key =
-      'dtk_${base64Url.encode(List<int>.generate(32, (_) => rng.nextInt(256))).replaceAll('=', '')}';
+  final key = 'dtk_${randomToken()}';
   // The plaintext key exists only here and in the one response that returns
   // it; register it so it is scrubbed from any error text it might reach
   // (the settings pane, the MCP transport's 500 path, the gateway's) —

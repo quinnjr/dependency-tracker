@@ -15,7 +15,7 @@ import 'package:deptracker/ui/settings.dart';
 /// caller applies `redact()` before rendering it.
 /// A backend that fails every read the way an absent secret service does, so
 /// the pane's PAT probe takes its KeyringUnavailable arm.
-class _UnavailableBackend implements SecretBackend {
+class _UnavailableBackend extends SecretBackend {
   @override
   Future<String?> read(String key) async =>
       throw Exception('no secret service');
@@ -28,7 +28,7 @@ class _UnavailableBackend implements SecretBackend {
   Future<void> delete(String key) async {}
 }
 
-class _ThrowingBackend implements SecretBackend {
+class _ThrowingBackend extends SecretBackend {
   @override
   Future<String?> read(String key) async => null;
 

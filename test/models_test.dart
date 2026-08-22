@@ -46,4 +46,37 @@ void main() {
       expect(merged.url, 'https://a/b');
     });
   });
+
+  group('wire round-trips (server ↔ web client share one definition)', () {
+    test('ScanResult survives toJson/fromJson', () {
+      const r = ScanResult(
+        projectsScanned: 3,
+        depsFound: 12,
+        errors: ['boom', 'bang'],
+      );
+      final back = ScanResult.fromJson(r.toJson());
+      expect(back.projectsScanned, 3);
+      expect(back.depsFound, 12);
+      expect(back.errors, ['boom', 'bang']);
+    });
+
+    test(
+      'ApiKeyInfo survives toJson/fromJson and omits nothing but the hash',
+      () {
+        final r = ApiKeyInfo(
+          id: 7,
+          name: 'claude-code',
+          createdAt: DateTime.utc(2026, 8, 22, 10),
+          lastUsedAt: DateTime.utc(2026, 8, 22, 11),
+        );
+        final json = r.toJson();
+        expect(json.containsKey('key_hash'), isFalse);
+        final back = ApiKeyInfo.fromJson(json);
+        expect(back.id, 7);
+        expect(back.name, 'claude-code');
+        expect(back.createdAt, DateTime.utc(2026, 8, 22, 10));
+        expect(back.lastUsedAt, DateTime.utc(2026, 8, 22, 11));
+      },
+    );
+  });
 }

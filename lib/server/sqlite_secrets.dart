@@ -9,7 +9,7 @@ import '../store.dart';
 /// store's `secret` table, keyed by the file beside the database. A leaked
 /// database or backup is useless without that file; a fully compromised
 /// host is out of scope, as for any keyring-less server.
-class SqliteSecretBackend implements SecretBackend {
+class SqliteSecretBackend extends SecretBackend {
   SqliteSecretBackend(this._store, List<int> aesKey)
     : _key = SecretKey(List<int>.from(aesKey));
 
@@ -40,4 +40,7 @@ class SqliteSecretBackend implements SecretBackend {
 
   @override
   Future<void> delete(String key) async => _store.secretDelete(key);
+
+  @override
+  Future<bool> has(String key) async => _store.secretGet(key) != null;
 }

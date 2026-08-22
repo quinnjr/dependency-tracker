@@ -21,7 +21,7 @@ class ServerSecretUnavailable implements SecretStoreUnavailable {
 /// `is-set`, deliberately shorter than `minRedactableSecretLength` so
 /// `Secrets.githubToken`'s registerSecret call ignores it instead of
 /// registering a constant string for redaction.
-class RestSecretBackend implements SecretBackend {
+class RestSecretBackend extends SecretBackend {
   RestSecretBackend(this._sync);
 
   final SyncClient _sync;

@@ -55,13 +55,12 @@ class SyncClient implements AuthController {
   /// the previous session — a revisit within the refresh window is one
   /// round trip, not a password prompt.
   Future<void> initialize() async {
-    await refreshStatus();
-    // A cookie-backed resume, through the same shared refresh path; any
-    // failure just leaves the login screen up rather than propagating out
-    // of bootstrap into a blank page.
-    if (await _refreshSession()) {
-      await hydrate();
-    }
+    // The status probe and the cookie-backed resume are independent, so run
+    // them together — one round trip on load instead of two. Any failure
+    // just leaves the login screen up rather than propagating out of
+    // bootstrap into a blank page.
+    final (_, resumed) = await (refreshStatus(), _refreshSession()).wait;
+    if (resumed) await hydrate();
     changes.notifyListeners();
   }
 
@@ -161,24 +160,16 @@ class SyncClient implements AuthController {
       orThrow: true,
     );
     _applySnapshot(body);
-    final report = (body!['report'] as Map).cast<String, Object?>();
-    return RefreshReport(
-      refreshed: report['refreshed'] as int? ?? 0,
-      failed: report['failed'] as int? ?? 0,
-      newReleases: report['newReleases'] as int? ?? 0,
-      rateLimited: report['rateLimited'] as bool? ?? false,
-      staleMarkingFailed: report['staleMarkingFailed'] as bool? ?? false,
+    return RefreshReport.fromJson(
+      (body!['report'] as Map).cast<String, Object?>(),
     );
   }
 
   Future<ScanResult> scan() async {
     final body = await _send('POST', 'api/scan', orThrow: true);
     _applySnapshot(body);
-    final result = (body!['result'] as Map).cast<String, Object?>();
-    return ScanResult(
-      projectsScanned: result['projectsScanned'] as int? ?? 0,
-      depsFound: result['depsFound'] as int? ?? 0,
-      errors: (result['errors'] as List? ?? const []).cast<String>(),
+    return ScanResult.fromJson(
+      (body!['result'] as Map).cast<String, Object?>(),
     );
   }
 
@@ -207,14 +198,7 @@ class SyncClient implements AuthController {
       final body = await _send('GET', 'api/mcp-keys', orThrow: true);
       return [
         for (final k in (body!['keys'] as List).cast<Map>())
-          ApiKeyInfo(
-            id: k['id'] as int,
-            name: k['name'] as String,
-            createdAt: DateTime.parse(k['createdAt'] as String),
-            lastUsedAt: k['lastUsedAt'] == null
-                ? null
-                : DateTime.parse(k['lastUsedAt'] as String),
-          ),
+          ApiKeyInfo.fromJson(k.cast<String, Object?>()),
       ];
     },
     create: (name) async {

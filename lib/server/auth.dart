@@ -3,7 +3,7 @@ import 'dart:math';
 
 import 'package:cryptography/cryptography.dart';
 
-import '../api_keys.dart' show hashApiKey;
+import '../api_keys.dart' show hashApiKey, randomToken;
 import '../store.dart';
 import 'jwt.dart';
 
@@ -172,9 +172,7 @@ class Auth {
       'iat': nowEpoch,
       'exp': nowEpoch + accessTokenTtl.inSeconds,
     }, _jwtKey);
-    final refreshToken = base64Url
-        .encode(List<int>.generate(32, (_) => _rng.nextInt(256)))
-        .replaceAll('=', '');
+    final refreshToken = randomToken();
     _store.insertRefreshToken(
       hashApiKey(refreshToken),
       userId,

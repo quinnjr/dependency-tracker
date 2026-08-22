@@ -144,6 +144,20 @@ class ScanResult {
   final int projectsScanned;
   final int depsFound;
   final List<String> errors;
+
+  /// Wire form shared by the server and the web client, defined once here so
+  /// the two ends cannot drift.
+  Map<String, Object?> toJson() => {
+    'projectsScanned': projectsScanned,
+    'depsFound': depsFound,
+    'errors': errors,
+  };
+
+  factory ScanResult.fromJson(Map<String, Object?> json) => ScanResult(
+    projectsScanned: json['projectsScanned'] as int? ?? 0,
+    depsFound: json['depsFound'] as int? ?? 0,
+    errors: (json['errors'] as List? ?? const []).cast<String>(),
+  );
 }
 
 /// A named MCP API key as the UI may see it: metadata only, never the hash
@@ -160,4 +174,22 @@ class ApiKeyInfo {
   final String name;
   final DateTime createdAt;
   final DateTime? lastUsedAt;
+
+  /// Wire form (metadata only — the hash never leaves the store), defined
+  /// once here so the server's list endpoint and the client's parser agree.
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'name': name,
+    'createdAt': createdAt.toIso8601String(),
+    'lastUsedAt': lastUsedAt?.toIso8601String(),
+  };
+
+  factory ApiKeyInfo.fromJson(Map<String, Object?> json) => ApiKeyInfo(
+    id: json['id'] as int,
+    name: json['name'] as String,
+    createdAt: DateTime.parse(json['createdAt'] as String),
+    lastUsedAt: json['lastUsedAt'] == null
+        ? null
+        : DateTime.parse(json['lastUsedAt'] as String),
+  );
 }

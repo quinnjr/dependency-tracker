@@ -28,15 +28,22 @@ class KeyringUnavailable implements SecretStoreUnavailable {
       'On Linux, ensure a secret service such as gnome-keyring is running.';
 }
 
-abstract interface class SecretBackend {
+abstract class SecretBackend {
   Future<String?> read(String key);
   Future<void> write(String key, String value);
   Future<void> delete(String key);
+
+  /// Whether a value is stored, without materializing it. The default reads
+  /// and discards; a backend that can answer more cheaply — the encrypted
+  /// SQLite store, which can check for the row without decrypting —
+  /// overrides it. Concrete (not an interface member) so backends inherit
+  /// it by `extends` rather than each re-implementing the default.
+  Future<bool> has(String key) async => (await read(key)) != null;
 }
 
 /// In-memory backend for tests, where no secret service is reachable. Never
 /// used by the shipped app.
-class MemorySecretBackend implements SecretBackend {
+class MemorySecretBackend extends SecretBackend {
   final Map<String, String> _values = {};
 
   void seed(String key, String value) => _values[key] = value;
@@ -69,6 +76,10 @@ class Secrets {
     registerSecret(value);
     return (value == null || value.isEmpty) ? null : value;
   }
+
+  /// Whether a GitHub token is stored, without decrypting it — for the
+  /// status endpoint, which only needs the boolean.
+  Future<bool> hasGithubToken() => _guard(() => _backend.has(_githubKey));
 
   /// An empty or whitespace-only token clears the entry rather than storing
   /// an empty string, so "no token" has exactly one representation.

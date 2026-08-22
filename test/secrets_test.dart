@@ -110,7 +110,7 @@ void main() {
 }
 
 /// Backend that fails the way a Linux box with no running secret service does.
-class FailingSecretBackend implements SecretBackend {
+class FailingSecretBackend extends SecretBackend {
   @override
   Future<String?> read(String key) async =>
       throw Exception('no secret service');

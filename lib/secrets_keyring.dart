@@ -10,7 +10,7 @@ import 'secrets.dart';
 /// in `dart:ui` through the Flutter framework, and the server binary — a
 /// plain-VM process that uses [SqliteSecretBackend] instead — must be able
 /// to import the rest of the secrets machinery without it.
-class KeyringBackend implements SecretBackend {
+class KeyringBackend extends SecretBackend {
   KeyringBackend([FlutterSecureStorage? storage])
     : _storage = storage ?? const FlutterSecureStorage();
 

@@ -114,7 +114,7 @@ class AppServer {
       await _json(response, HttpStatus.ok, {
         'users': store.userCount(),
         'registrationOpen': auth.registrationOpen,
-        'githubTokenSet': (await secrets.githubToken()) != null,
+        'githubTokenSet': await secrets.hasGithubToken(),
         'mcpPath': mcpPath,
       });
       return;
@@ -192,32 +192,12 @@ class AppServer {
       case ('POST', ['refresh']):
         final watchId = (await _body(request))['watchId'];
         final report = await _refresh(watchId is int ? watchId : null);
-        await _mutated(
-          response,
-          extra: {
-            'report': {
-              'refreshed': report.refreshed,
-              'failed': report.failed,
-              'newReleases': report.newReleases,
-              'rateLimited': report.rateLimited,
-              'staleMarkingFailed': report.staleMarkingFailed,
-            },
-          },
-        );
+        await _mutated(response, extra: {'report': report.toJson()});
 
       case ('POST', ['scan']):
         if (!_requireAdmin(claims, response)) return;
         final result = await _scan();
-        await _mutated(
-          response,
-          extra: {
-            'result': {
-              'projectsScanned': result.projectsScanned,
-              'depsFound': result.depsFound,
-              'errors': result.errors,
-            },
-          },
-        );
+        await _mutated(response, extra: {'result': result.toJson()});
 
       case ('POST', ['scan-roots']):
         // Scan roots are server filesystem paths and scanning walks them —
@@ -260,15 +240,7 @@ class AppServer {
       case ('GET', ['mcp-keys']):
         if (!_requireAdmin(claims, response)) return;
         await _json(response, HttpStatus.ok, {
-          'keys': [
-            for (final k in store.apiKeys())
-              {
-                'id': k.id,
-                'name': k.name,
-                'createdAt': k.createdAt.toIso8601String(),
-                'lastUsedAt': k.lastUsedAt?.toIso8601String(),
-              },
-          ],
+          'keys': [for (final k in store.apiKeys()) k.toJson()],
         });
 
       case ('POST', ['mcp-keys']):
@@ -581,13 +553,15 @@ class AppServer {
       return;
     }
     var file = File(resolved);
-    if (!file.existsSync()) {
+    if (!await file.exists()) {
       // SPA fallback: unknown extensionless paths are client-side routes
-      // and get the app shell; unknown assets stay honest 404s.
+      // and get the app shell; unknown assets stay honest 404s. Async
+      // existence checks keep the event loop free rather than blocking it
+      // in the request path.
       if (p.extension(resolved).isEmpty) {
         file = File(p.join(webRootAbs, 'index.html'));
       }
-      if (!file.existsSync()) {
+      if (!await file.exists()) {
         await _notFound(response);
         return;
       }

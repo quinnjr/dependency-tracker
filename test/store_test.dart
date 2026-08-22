@@ -693,6 +693,14 @@ void main() {
     expect(notified, 1);
   });
 
+  test('metaSet does not advance the snapshot revision', () {
+    // `meta` is not a snapshot table; a meta write (e.g. the registration
+    // flag) must not change the ETag and make every client re-fetch.
+    final before = store.revision();
+    store.metaSet('some_key', 'some_value');
+    expect(store.revision(), before);
+  });
+
   test('insertReleases returns the count of rows actually inserted, not '
       'the whole table', () {
     final id = store.upsertWatch(WatchKind.pub, 'http');

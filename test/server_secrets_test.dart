@@ -75,6 +75,26 @@ void main() {
     expect(store.secretGet('x'), isNull);
   });
 
+  test(
+    'hasGithubToken answers without decrypting (and does not register)',
+    () async {
+      final store = Store.openInMemory();
+      addTearDown(store.close);
+      final keys = await loadOrCreateServerKeys(p.join(tmp.path, 'k'));
+      final secrets = Secrets(SqliteSecretBackend(store, keys.aesKey));
+      expect(await secrets.hasGithubToken(), isFalse);
+      await secrets.setGithubToken('ghp_averyrealtoken1234');
+      expect(await secrets.hasGithubToken(), isTrue);
+      // Existence is answered from the row alone — a different key still sees
+      // the row is present.
+      final k2 = await loadOrCreateServerKeys(p.join(tmp.path, 'k2'));
+      expect(
+        await Secrets(SqliteSecretBackend(store, k2.aesKey)).hasGithubToken(),
+        isTrue,
+      );
+    },
+  );
+
   test('secret writes do not notify listeners', () async {
     final store = Store.openInMemory();
     addTearDown(store.close);
