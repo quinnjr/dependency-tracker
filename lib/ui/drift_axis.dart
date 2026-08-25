@@ -23,6 +23,7 @@ class DriftAxis extends StatelessWidget {
     required this.releaseVersions,
     required this.resolvedPins,
     this.unresolvedPinCount = 0,
+    this.behindBy,
   });
 
   /// Every fetched release, in any order.
@@ -36,6 +37,15 @@ class DriftAxis extends StatelessWidget {
   /// on the axis without inventing a position, so they are counted and named
   /// in the legend instead.
   final int unresolvedPinCount;
+
+  /// The authoritative behind-count from [Store.driftFor], measured by
+  /// version arithmetic over every resolved pin — including any that fall
+  /// off this axis because the registry no longer lists them. When given,
+  /// the legend and screen-reader summary report this number so the detail
+  /// pane and the list row never disagree; the painted run stays rank-based
+  /// (it can only draw pins it can place). When null, the axis falls back
+  /// to its own rank distance from the stalest plotted pin.
+  final int? behindBy;
 
   @override
   Widget build(BuildContext context) {
@@ -64,7 +74,11 @@ class DriftAxis extends StatelessWidget {
     final stalest = plotted.isEmpty
         ? null
         : plotted.reduce((a, b) => a < b ? a : b);
-    final behindBy = stalest == null ? 0 : ordered.length - 1 - stalest;
+    // The number the legend states comes from Store.driftFor when the caller
+    // passed it, so it matches the list row exactly; only when absent does
+    // the axis fall back to its own rank distance.
+    final rankBehind = stalest == null ? 0 : ordered.length - 1 - stalest;
+    final behindBy = this.behindBy ?? rankBehind;
 
     return Semantics(
       label: _semanticSummary(ordered, plotted, behindBy, offAxis),

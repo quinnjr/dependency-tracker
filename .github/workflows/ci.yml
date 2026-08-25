@@ -93,6 +93,60 @@ jobs:
       - uses: ./.github/actions/setup-flutter
       - run: flutter build ${{ matrix.target }} --release
 
+  build-web:
+    name: Build (web)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same reasoning as the Windows DLL gate above: a prebuilt binary a
+      # reviewer cannot read in a diff gets its recorded checksum verified
+      # rather than trusted.
+      - name: Verify vendored sqlite3.wasm
+        run: |
+          set -euo pipefail
+          cd web
+          sha256sum -c sqlite3.wasm.sha256
+
+      - uses: ./.github/actions/setup-flutter
+
+      # Doubles as the leak gate: this compile fails if any dart:io-only
+      # import (scanner, keyring, MCP transport, FFI sqlite3) reaches the
+      # web target through the conditional-import seams.
+      - name: Build the web target
+        run: flutter build web --release
+
+      # The whole stack, for real: the server binary on a fresh database,
+      # serving the frontend just built, walked through the auth bootstrap.
+      - name: Server smoke test
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/smoke
+          dart run bin/server.dart --db /tmp/smoke/dep.db --web-root build/web \
+            --bind 127.0.0.1 --port 8917 &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8917/api/status && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8917/ | grep -qi '<html'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8917/api/snapshot)" = 401
+          TOKEN=$(curl -fsS -X POST http://127.0.0.1:8917/api/auth/register \
+            -H 'content-type: application/json' \
+            -d '{"username":"smoke","password":"smoke-password-1"}' \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin)["accessToken"])')
+          curl -fsS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8917/api/snapshot >/dev/null
+          curl -fsS -X PUT -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+            -d '{"token":"ghp_smoketesttoken42"}' http://127.0.0.1:8917/api/secrets/github-token
+          curl -fsS http://127.0.0.1:8917/api/status | grep -q '"githubTokenSet":true'
+          kill $SERVER_PID
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-build
+          path: build/web
+
   flatpak:
     name: Flatpak (build, resolve, launch)
     runs-on: ubuntu-24.04

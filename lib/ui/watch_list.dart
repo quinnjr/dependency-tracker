@@ -112,9 +112,12 @@ class _WatchRow extends StatelessWidget {
     if (usages == 0) return 'not used by any scanned project';
     final projects = '$usages ${usages == 1 ? 'project' : 'projects'}';
     final d = drift;
-    if (d == null || d.pinnedProjects == 0) {
-      return '$projects · no resolved pin';
-    }
+    // A null drift is not "no resolved pin" — driftFor omits a watch that
+    // has no fetched release yet, so this is a scanned-but-never-refreshed
+    // watch whose pins are simply unknown to us, distinct from a watch
+    // whose pins really are all ranges (pinnedProjects == 0).
+    if (d == null) return '$projects · no releases fetched yet';
+    if (d.pinnedProjects == 0) return '$projects · pinned by range only';
     return d.isSplit
         ? '$projects · ${d.lowestPin} → ${d.highestPin}'
         : '$projects · ${d.lowestPin}';

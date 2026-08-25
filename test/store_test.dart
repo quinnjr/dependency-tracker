@@ -399,6 +399,153 @@ void main() {
     expect(store.etagFor('https://x/y'), 'W/"def"');
   });
 
+  test(
+    'openAsync opens a database at a path, like open but awaitable',
+    () async {
+      final dir = Directory.systemTemp.createTempSync('store_async');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final s = await Store.openAsync(p.join(dir.path, 'async.db'));
+      addTearDown(s.close);
+      final id = s.upsertWatch(WatchKind.pub, 'http');
+      expect(s.watchById(id), isNotNull);
+    },
+  );
+
+  group('snapshot', () {
+    test('exportSnapshot carries exactly the four UI tables plus revision', () {
+      final id = store.upsertWatch(WatchKind.pub, 'http');
+      store.replaceUsagesForProject('/r/one', 'pubspec.lock', [
+        _usage(id, '/r/one'),
+      ]);
+      store.insertReleases(id, [Release(watchId: id, version: '1.1.0')]);
+      store.addScanRoot('/r');
+      // Rows that must NOT travel: secrets, users, keys, cache.
+      store.secretPut('gh', [1, 2, 3], [4, 5, 6]);
+      store.insertUser('owner', 'argon2id\$x\$y', 'admin');
+      store.insertApiKey('agent', 'somehash');
+      store.putCache('https://x', 'W/"e"', '{}');
+
+      final snap = store.exportSnapshot();
+      expect(snap.keys.toSet(), {
+        'revision',
+        'watch',
+        'usage',
+        'release',
+        'scan_root',
+      });
+    });
+
+    test('importSnapshot makes a second store identical, in one '
+        'notification', () {
+      final id = store.upsertWatch(WatchKind.pub, 'http');
+      store.upsertWatch(WatchKind.npm, 'left-pad');
+      store.replaceUsagesForProject('/r/one', 'pubspec.lock', [
+        _usage(id, '/r/one'),
+      ]);
+      store.insertReleases(id, [Release(watchId: id, version: '1.1.0')]);
+      store.addScanRoot('/r');
+
+      final b = Store.openInMemory();
+      addTearDown(b.close);
+      var notified = 0;
+      b.addListener(() => notified++);
+      b.importSnapshot(store.exportSnapshot());
+
+      expect(notified, 1);
+      expect(
+        b.watches().map((w) => w.id).toList(),
+        store.watches().map((w) => w.id).toList(),
+      );
+      expect(b.usagesFor(id).single.projectPath, '/r/one');
+      expect(b.releasesFor(id).single.version, '1.1.0');
+      expect(b.scanRoots(), ['/r']);
+    });
+
+    test('importSnapshot replaces, not merges', () {
+      // The source holds one watch; every server-side mutation advances the
+      // revision, so its snapshot is at least as new as the mirror's.
+      store.upsertWatch(WatchKind.pub, 'http');
+      final b = Store.openInMemory();
+      addTearDown(b.close);
+      b.upsertWatch(WatchKind.crates, 'serde'); // a row the source lacks
+      b.importSnapshot(store.exportSnapshot());
+      expect(b.watches().map((w) => w.displayName), ['http']);
+    });
+
+    test('any server-side mutation advances the revision, so an MCP-driven '
+        'change is not a false 304', () {
+      final before = store.revision();
+      // A plain mutation — the kind an MCP tool makes, with no REST wrapper
+      // calling bumpRevision — must still move the ETag.
+      store.upsertWatch(WatchKind.pub, 'http');
+      expect(store.revision(), greaterThan(before));
+    });
+
+    test('bumpRevision is monotonic and rides along in the export', () {
+      final r1 = store.bumpRevision();
+      expect(store.bumpRevision(), r1 + 1);
+      expect(store.revision(), r1 + 1);
+      expect(store.exportSnapshot()['revision'], r1 + 1);
+    });
+
+    test(
+      'importSnapshot drops a snapshot older than the mirror already holds',
+      () {
+        // The mirror is at revision 5 with one watch...
+        final ahead = Store.openInMemory();
+        addTearDown(ahead.close);
+        ahead.upsertWatch(WatchKind.pub, 'current');
+        while (ahead.revision() < 5) {
+          ahead.bumpRevision();
+        }
+
+        // ...and a stale revision-3 snapshot (empty) arrives out of order.
+        final stale = {
+          'revision': 3,
+          'watch': <Map<String, Object?>>[],
+          'usage': <Map<String, Object?>>[],
+          'release': <Map<String, Object?>>[],
+          'scan_root': <Map<String, Object?>>[],
+        };
+        expect(ahead.importSnapshot(stale), isFalse);
+        expect(ahead.watches(), hasLength(1), reason: 'not rolled backward');
+
+        // A newer snapshot still applies.
+        final fresh = {...stale, 'revision': 6};
+        expect(ahead.importSnapshot(fresh), isTrue);
+        expect(ahead.watches(), isEmpty);
+      },
+    );
+
+    test('a lower revision from a different generation still applies '
+        '(server reset/restore does not freeze the mirror)', () {
+      final ahead = Store.openInMemory();
+      addTearDown(ahead.close);
+      Map<String, Object?> snap(int rev, String gen) => {
+        'revision': rev,
+        'generation': gen,
+        'watch': <Map<String, Object?>>[],
+        'usage': <Map<String, Object?>>[],
+        'release': <Map<String, Object?>>[],
+        'scan_root': <Map<String, Object?>>[],
+      };
+
+      // Hydrated to revision 50 of server generation A.
+      ahead.upsertWatch(WatchKind.pub, 'stale');
+      expect(ahead.importSnapshot(snap(50, 'gen-A')), isTrue);
+
+      // A stale in-flight response from the SAME generation is still dropped.
+      expect(ahead.importSnapshot(snap(40, 'gen-A')), isFalse);
+
+      // But the server restarts/restores: generation B, revision reset to 12.
+      // Lower number, different timeline — it must apply, not freeze.
+      expect(ahead.importSnapshot(snap(12, 'gen-B')), isTrue);
+      expect(ahead.revision(), 12);
+      // And now generation-B staleness is judged against 12.
+      expect(ahead.importSnapshot(snap(11, 'gen-B')), isFalse);
+    });
+  });
+
   test('mutations notify listeners', () {
     var notified = 0;
     store.addListener(() => notified++);
@@ -538,9 +685,7 @@ void main() {
 
     // `behind` is outdated with an unread release; `snoozed` would be both
     // but is hidden from unread/outdated by its snooze; `current` is neither.
-    store.insertReleases(behind, [
-      Release(watchId: behind, version: '2.0.0'),
-    ]);
+    store.insertReleases(behind, [Release(watchId: behind, version: '2.0.0')]);
     store.replaceUsagesForProject('/r/one', 'pubspec.lock', [
       _usage(behind, '/r/one'),
     ]);
@@ -574,6 +719,14 @@ void main() {
     store.addListener(() => notified++);
     store.metaSet('some_key', 'some_value');
     expect(notified, 1);
+  });
+
+  test('metaSet does not advance the snapshot revision', () {
+    // `meta` is not a snapshot table; a meta write (e.g. the registration
+    // flag) must not change the ETag and make every client re-fetch.
+    final before = store.revision();
+    store.metaSet('some_key', 'some_value');
+    expect(store.revision(), before);
   });
 
   test('insertReleases returns the count of rows actually inserted, not '

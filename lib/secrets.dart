@@ -1,20 +1,25 @@
-import 'dart:convert';
-import 'dart:math';
-
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-
 import 'redact.dart';
 
 const String _githubKey = 'github_pat';
-const String _mcpKey = 'mcp_bearer_token';
+
+/// The secret store could not be reached. A backend-neutral supertype so a
+/// caller (the settings pane) can catch one type for both the desktop
+/// keyring and the web REST backend, and each backend can carry its own
+/// message — the web one must not tell a browser user to start
+/// gnome-keyring.
+abstract class SecretStoreUnavailable implements Exception {
+  Object get cause;
+}
 
 /// Raised when the host has no usable keyring.
 ///
-/// The spec forbids falling back to a plaintext file or to an unauthenticated
-/// MCP server, so this is fatal for the MCP server and surfaced to the user
-/// rather than swallowed.
-class KeyringUnavailable implements Exception {
+/// The spec forbids falling back to a plaintext file, so this is surfaced to
+/// the user rather than swallowed. It costs only the optional GitHub PAT:
+/// the MCP server authenticates against hashed API keys in the store, not
+/// keyring material, so it runs regardless.
+class KeyringUnavailable implements SecretStoreUnavailable {
   KeyringUnavailable(this.cause);
+  @override
   final Object cause;
 
   @override
@@ -23,35 +28,22 @@ class KeyringUnavailable implements Exception {
       'On Linux, ensure a secret service such as gnome-keyring is running.';
 }
 
-abstract interface class SecretBackend {
+abstract class SecretBackend {
   Future<String?> read(String key);
   Future<void> write(String key, String value);
   Future<void> delete(String key);
-}
 
-/// The only backend the shipped app may construct: wraps the OS keyring via
-/// `flutter_secure_storage` (libsecret on Linux, Keychain on macOS, DPAPI on
-/// Windows).
-class KeyringBackend implements SecretBackend {
-  KeyringBackend([FlutterSecureStorage? storage])
-    : _storage = storage ?? const FlutterSecureStorage();
-
-  final FlutterSecureStorage _storage;
-
-  @override
-  Future<String?> read(String key) => _storage.read(key: key);
-
-  @override
-  Future<void> write(String key, String value) =>
-      _storage.write(key: key, value: value);
-
-  @override
-  Future<void> delete(String key) => _storage.delete(key: key);
+  /// Whether a value is stored, without materializing it. The default reads
+  /// and discards; a backend that can answer more cheaply — the encrypted
+  /// SQLite store, which can check for the row without decrypting —
+  /// overrides it. Concrete (not an interface member) so backends inherit
+  /// it by `extends` rather than each re-implementing the default.
+  Future<bool> has(String key) async => (await read(key)) != null;
 }
 
 /// In-memory backend for tests, where no secret service is reachable. Never
 /// used by the shipped app.
-class MemorySecretBackend implements SecretBackend {
+class MemorySecretBackend extends SecretBackend {
   final Map<String, String> _values = {};
 
   void seed(String key, String value) => _values[key] = value;
@@ -71,8 +63,9 @@ class MemorySecretBackend implements SecretBackend {
 ///
 /// Every secret read here is immediately handed to [registerSecret], so a
 /// value cannot be in memory without also being redactable from error text.
-/// Neither the GitHub PAT nor the MCP bearer token is ever passed to `Store`,
-/// written to a config file, or logged — both live only through this class.
+/// The GitHub PAT — the keyring's one remaining tenant now that MCP
+/// authenticates against hashed API keys — is never passed to `Store`,
+/// written to a config file, or logged; it lives only through this class.
 class Secrets {
   Secrets(this._backend);
 
@@ -83,6 +76,23 @@ class Secrets {
     registerSecret(value);
     return (value == null || value.isEmpty) ? null : value;
   }
+
+  /// [githubToken] but tolerant of an unreachable store: returns null rather
+  /// than throwing when the secret cannot be read (no keyring on desktop, a
+  /// corrupt or rotated key file on the server). The token is optional, so a
+  /// refresh should degrade to unauthenticated fetching, not fail wholesale
+  /// with a keyring message.
+  Future<String?> githubTokenOrNull() async {
+    try {
+      return await githubToken();
+    } on SecretStoreUnavailable {
+      return null;
+    }
+  }
+
+  /// Whether a GitHub token is stored, without decrypting it — for the
+  /// status endpoint, which only needs the boolean.
+  Future<bool> hasGithubToken() => _guard(() => _backend.has(_githubKey));
 
   /// An empty or whitespace-only token clears the entry rather than storing
   /// an empty string, so "no token" has exactly one representation.
@@ -109,38 +119,13 @@ class Secrets {
     await _guard(() => _backend.write(_githubKey, trimmed));
   }
 
-  /// Returns the MCP bearer token, generating and storing one on first use.
-  ///
-  /// Generating on read means there is no separate provisioning step that
-  /// could be skipped, leaving the server running without a token.
-  Future<String> mcpToken() async {
-    final existing = await _guard(() => _backend.read(_mcpKey));
-    if (existing != null && existing.isNotEmpty) {
-      registerSecret(existing);
-      return existing;
-    }
-    return _generateMcpToken();
-  }
-
-  Future<void> rotateMcpToken() async {
-    await _guard(() => _backend.delete(_mcpKey));
-    await _generateMcpToken();
-  }
-
-  Future<String> _generateMcpToken() async {
-    final random = Random.secure();
-    final bytes = List<int>.generate(32, (_) => random.nextInt(256));
-    // base64url without padding: safe in an Authorization header and in JSON.
-    final token = base64Url.encode(bytes).replaceAll('=', '');
-    registerSecret(token);
-    await _guard(() => _backend.write(_mcpKey, token));
-    return token;
-  }
-
   Future<T> _guard<T>(Future<T> Function() action) async {
     try {
       return await action();
-    } on KeyringUnavailable {
+    } on SecretStoreUnavailable {
+      // A backend that already framed its own unavailability (the web REST
+      // backend, the keyring) keeps its message; only a truly unexpected
+      // error gets wrapped as a keyring failure.
       rethrow;
     } catch (e) {
       throw KeyringUnavailable(e);

@@ -3,8 +3,8 @@
 // a test. `main()` itself stays untestable (it opens the real database, talks
 // to the real keyring, and binds a port), but everything it assembles is
 // injectable and is covered here.
+import 'package:deptracker/bootstrap/app_resources.dart';
 import 'package:deptracker/main.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:deptracker/models.dart';
 import 'package:deptracker/net.dart';
 import 'package:deptracker/refresh.dart';
@@ -18,18 +18,33 @@ late Store store;
 late Net net;
 late int refreshes;
 
-Widget subject({int? mcpPort = 51234, Object? mcpError}) => TrackerApp(
-  store: store,
-  secrets: Secrets(MemorySecretBackend()),
-  net: net,
-  refresh: (id) async {
-    refreshes++;
-    return const RefreshReport(refreshed: 1, failed: 0, newReleases: 0);
-  },
-  transport: null,
-  mcpPort: mcpPort,
-  mcpError: mcpError,
-);
+Widget subject({int? mcpPort = 51234, Object? mcpError, bool isWeb = false}) =>
+    TrackerApp(
+      resources: AppResources(
+        store: store,
+        secrets: Secrets(MemorySecretBackend()),
+        net: net,
+        refresh: (id) async {
+          refreshes++;
+          return const RefreshReport(refreshed: 1, failed: 0, newReleases: 0);
+        },
+        // The cancelled-pick case: adds nothing, which the wiring test
+        // asserts. Web has no picker (server paths are typed) but does
+        // scan, as bootstrap_web wires it over REST.
+        pickDirectory: isWeb ? null : () async => null,
+        onScan: () async =>
+            const ScanResult(projectsScanned: 0, depsFound: 0, errors: []),
+        mcpKeys: McpKeyOps.local(store),
+        mutations: StoreMutations.local(store),
+        mcpPort: mcpPort,
+        mcpError: mcpError,
+        isWeb: isWeb,
+        shutdown: () async {
+          net.close();
+          store.close();
+        },
+      ),
+    );
 
 /// Asks the engine to close the app, which is what drives
 /// `AppLifecycleListener.onExitRequested`.
@@ -98,18 +113,13 @@ void main() {
     expect(() => store.watches(), throwsA(anything));
   });
 
-  testWidgets('the settings pane is wired to the real picker and scanner', (
+  testWidgets('the settings pane is wired to the picker and scanner', (
     tester,
   ) async {
-    // TrackerApp passes two closures down to SettingsPane: the directory
-    // picker and the scanner. Building the widget does not run them — only the
-    // pane's own buttons do — so they were the last unexercised lines in the
-    // file that wires the whole app together.
-    //
-    // FilePicker.platform is registered by the plugin at app startup, which a
-    // widget test never runs, so it is substituted here. Returning null is
-    // the cancelled case, which must leave the roots untouched.
-    FilePicker.platform = _CancellingPicker();
+    // TrackerApp passes the bootstrap's two closures down to SettingsPane.
+    // Building the widget does not run them — only the pane's own buttons
+    // do — so tapping through proves the wiring, with the injected picker
+    // returning null: the cancelled case, which must leave roots untouched.
     await tester.pumpWidget(subject());
     await tester.pumpAndSettle();
 
@@ -142,14 +152,17 @@ void main() {
     expect(tester.takeException(), isNull);
     store.close();
   });
-}
 
-/// Stands in for the plugin instance the app registers at startup.
-class _CancellingPicker extends FilePicker {
-  @override
-  Future<String?> getDirectoryPath({
-    String? dialogTitle,
-    bool lockParentWindow = false,
-    String? initialDirectory,
-  }) async => null;
+  testWidgets('a web resource bag reaches the settings pane as server mode', (
+    tester,
+  ) async {
+    await tester.pumpWidget(subject(isWeb: true, mcpPort: null));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('SERVER MODE'), findsOneWidget);
+    expect(find.byKey(const Key('scan-root-path')), findsOneWidget);
+  });
 }

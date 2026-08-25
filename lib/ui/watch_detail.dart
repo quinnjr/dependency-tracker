@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../bootstrap/app_resources.dart';
 import '../models.dart';
 import '../store.dart';
 import '../versions.dart';
@@ -7,9 +8,19 @@ import 'drift_axis.dart';
 import 'theme.dart';
 
 class WatchDetail extends StatelessWidget {
-  const WatchDetail({super.key, required this.store, required this.watchId});
+  const WatchDetail({
+    super.key,
+    required this.store,
+    required this.mutations,
+    required this.watchId,
+  });
 
   final Store store;
+
+  /// Reads come straight off [store]; writes go through here, so the web
+  /// build can route them to the server instead.
+  final StoreMutations mutations;
+
   final int? watchId;
 
   @override
@@ -38,7 +49,7 @@ class WatchDetail extends StatelessWidget {
       child: ListView(
         padding: EdgeInsets.zero,
         children: [
-          _Header(store: store, watch: watch),
+          _Header(store: store, mutations: mutations, watch: watch),
 
           if (watch.lastError != null)
             Container(
@@ -68,6 +79,9 @@ class WatchDetail extends StatelessWidget {
                 releaseVersions: [for (final r in releases) r.version],
                 resolvedPins: resolvedPins,
                 unresolvedPinCount: usages.length - resolvedPins.length,
+                // The same behind-count the list row shows, so the two never
+                // disagree when a pin falls off the axis.
+                behindBy: store.driftFor([id])[id]?.behindBy,
               ),
             ),
 
@@ -103,7 +117,7 @@ class WatchDetail extends StatelessWidget {
                               newestPin != null &&
                               compareVersions(r.version, newestPin) > 0,
                           onRead: () =>
-                              store.markRead(watchId!, version: r.version),
+                              mutations.markRead(watchId!, version: r.version),
                         ),
                     ],
                   ),
@@ -159,9 +173,14 @@ class _Placeholder extends StatelessWidget {
 }
 
 class _Header extends StatelessWidget {
-  const _Header({required this.store, required this.watch});
+  const _Header({
+    required this.store,
+    required this.mutations,
+    required this.watch,
+  });
 
   final Store store;
+  final StoreMutations mutations;
   final Watch watch;
 
   @override
@@ -188,11 +207,11 @@ class _Header extends StatelessWidget {
                 ),
               ),
               TextButton(
-                onPressed: () => store.markRead(id),
+                onPressed: () => mutations.markRead(id),
                 child: const Text('Mark all read'),
               ),
               TextButton(
-                onPressed: () => store.snooze(
+                onPressed: () => mutations.snooze(
                   id,
                   DateTime.now().toUtc().add(const Duration(days: 30)),
                 ),

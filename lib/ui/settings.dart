@@ -1,20 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../mcp/transport.dart';
+import '../api_keys.dart';
+import '../bootstrap/app_resources.dart';
+import '../mcp/endpoint.dart';
+import '../models.dart';
 import '../redact.dart';
-import '../scanner.dart';
 import '../secrets.dart';
 import '../store.dart';
 import 'theme.dart';
 
 /// The settings pane: scan roots, the optional GitHub PAT, and the MCP
-/// server's status.
+/// API-key manager.
 ///
 /// [pickDirectory] is injected so a widget test can supply a path with no
-/// native dialog. [mcpPort] and [mcpError] are also injected: this widget
-/// never starts or owns the transport, it only reports what `main.dart`
-/// already decided at launch.
+/// native dialog; when it is null but [onScan] is not — the server-backed
+/// web build, where the paths are the server's — the add-root control is a
+/// typed path field instead of a picker. [mcpPort] and [mcpError] are also
+/// injected: this widget never starts or owns the transport, it only
+/// reports what the bootstrap already decided at launch.
+///
+/// [isWeb] selects the server-mode copy and sections: a note about where
+/// the data lives, the account section (driven by [auth]), and the MCP
+/// endpoint shown as a path on this origin rather than a loopback port.
 class SettingsPane extends StatefulWidget {
   const SettingsPane({
     super.key,
@@ -22,18 +30,35 @@ class SettingsPane extends StatefulWidget {
     required this.secrets,
     required this.pickDirectory,
     required this.onScan,
+    required this.mcpKeys,
+    required this.mutations,
     required this.mcpPort,
+    this.auth,
     this.mcpError,
+    this.isWeb = false,
   });
 
   final Store store;
   final Secrets secrets;
-  final Future<String?> Function() pickDirectory;
-  final Future<ScanResult> Function() onScan;
+  final Future<String?> Function()? pickDirectory;
+  final Future<ScanResult> Function()? onScan;
+
+  /// List/create/revoke for the MCP API keys the transport authenticates
+  /// against — injected so web can back them with REST.
+  final McpKeyOps mcpKeys;
+
+  /// Scan-root mutations — injected for the same reason.
+  final StoreMutations mutations;
+
   final int? mcpPort;
 
-  /// Non-null when the MCP server could not start — most often no keyring.
+  /// Present on web: drives the account section.
+  final AuthController? auth;
+
+  /// Non-null when the MCP server could not start.
   final Object? mcpError;
+
+  final bool isWeb;
 
   @override
   State<SettingsPane> createState() => _SettingsPaneState();
@@ -41,22 +66,44 @@ class SettingsPane extends StatefulWidget {
 
 class _SettingsPaneState extends State<SettingsPane> {
   final _patController = TextEditingController();
+  final _keyNameController = TextEditingController();
+  final _rootPathController = TextEditingController();
   String? _scanSummary;
   var _scanning = false;
   var _hasStoredPat = false;
-  String? _revealedToken;
   String? _patStatus;
   var _patStatusIsError = false;
+
+  List<ApiKeyInfo> _keys = const [];
+
+  /// The key minted by the most recent "Create key" tap. Held only until the
+  /// next mint (or pane rebuild from scratch): the hash in the store is all
+  /// that survives, so this is genuinely the one chance to copy it.
+  MintedKey? _justMinted;
+  String? _keyError;
 
   @override
   void initState() {
     super.initState();
+    // The pane is shown in a dialog, outside AppShell's NotifierBuilder, so
+    // it must subscribe to the store itself — otherwise a scan-root change
+    // that lands asynchronously (the web build POSTs, then applies the
+    // returned snapshot to the mirror) would not repaint the list.
+    widget.store.addListener(_onStoreChanged);
     _loadPatPresence();
+    _loadKeys();
+  }
+
+  void _onStoreChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    widget.store.removeListener(_onStoreChanged);
     _patController.dispose();
+    _keyNameController.dispose();
+    _rootPathController.dispose();
     super.dispose();
   }
 
@@ -64,28 +111,51 @@ class _SettingsPaneState extends State<SettingsPane> {
     try {
       final token = await widget.secrets.githubToken();
       if (mounted) setState(() => _hasStoredPat = token != null);
-    } on KeyringUnavailable {
-      // Nothing to report here: the MCP error banner already explains it.
+    } on SecretStoreUnavailable {
+      // Nothing to report here: on desktop the MCP error banner already
+      // explains a missing keyring, and on web the REST backend already
+      // degrades a failed probe to "not set".
+    }
+  }
+
+  Future<void> _loadKeys() async {
+    try {
+      final keys = await widget.mcpKeys.list();
+      if (mounted) setState(() => _keys = keys);
+    } catch (e) {
+      if (mounted) setState(() => _keyError = redact(e.toString()));
     }
   }
 
   Future<void> _addRoot() async {
-    final path = await widget.pickDirectory();
+    final path = await widget.pickDirectory!();
     if (path == null || path.isEmpty) return;
-    widget.store.addScanRoot(path);
+    widget.mutations.addScanRoot(path);
     if (mounted) setState(() {});
+  }
+
+  void _addTypedRoot() {
+    final path = _rootPathController.text.trim();
+    if (path.isEmpty) return;
+    widget.mutations.addScanRoot(path);
+    _rootPathController.clear();
+    setState(() {});
   }
 
   Future<void> _scan() async {
     setState(() => _scanning = true);
     try {
-      final r = await widget.onScan();
+      final r = await widget.onScan!();
       if (!mounted) return;
       setState(
         () => _scanSummary =
             '${r.projectsScanned} projects, ${r.depsFound} dependencies'
             '${r.errors.isEmpty ? '' : ', ${r.errors.length} problems'}',
       );
+    } catch (_) {
+      // On web the scan runs on the server and can fail; report it rather
+      // than leaving the button spinning silently.
+      if (mounted) setState(() => _scanSummary = 'Scan failed.');
     } finally {
       if (mounted) setState(() => _scanning = false);
     }
@@ -103,7 +173,9 @@ class _SettingsPaneState extends State<SettingsPane> {
       await _loadPatPresence();
       if (!mounted) return;
       setState(() {
-        _patStatus = 'Token saved to the host keyring.';
+        _patStatus = widget.isWeb
+            ? 'Token saved to the server, encrypted at rest.'
+            : 'Token saved to the host keyring.';
         _patStatusIsError = false;
       });
     } on ArgumentError catch (e) {
@@ -112,7 +184,9 @@ class _SettingsPaneState extends State<SettingsPane> {
         _patStatus = e.message.toString();
         _patStatusIsError = true;
       });
-    } on KeyringUnavailable catch (e) {
+    } on SecretStoreUnavailable catch (e) {
+      // Covers both a missing keyring (desktop) and an unreachable server
+      // (web); each type renders its own message, redacted for safety.
       if (!mounted) return;
       setState(() {
         _patStatus = redact(e.toString());
@@ -121,16 +195,129 @@ class _SettingsPaneState extends State<SettingsPane> {
     }
   }
 
-  Future<void> _revealToken() async {
-    final token = await widget.secrets.mcpToken();
-    if (mounted) setState(() => _revealedToken = token);
+  Future<void> _createKey() async {
+    final name = _keyNameController.text.trim();
+    if (name.isEmpty) {
+      setState(() => _keyError = 'Name the key first — e.g. "claude-code".');
+      return;
+    }
+    try {
+      final minted = await widget.mcpKeys.create(name);
+      _keyNameController.clear();
+      if (!mounted) return;
+      setState(() {
+        _justMinted = minted;
+        _keyError = null;
+      });
+    } catch (e) {
+      // The one expected failure is a duplicate name (UNIQUE on api_key).
+      if (mounted) setState(() => _keyError = redact(e.toString()));
+    }
+    await _loadKeys();
   }
 
-  /// Rotation invalidates every existing MCP client's saved bearer token, so
-  /// this only ever runs from an explicit tap, never automatically.
-  Future<void> _rotateToken() async {
-    await widget.secrets.rotateMcpToken();
-    await _revealToken();
+  Future<void> _revokeKey(int id) async {
+    try {
+      await widget.mcpKeys.revoke(id);
+    } catch (e) {
+      // The web revoke goes over REST (orThrow) and can fail; report it
+      // rather than raising an uncaught async error and silently no-opping.
+      if (mounted) setState(() => _keyError = redact(e.toString()));
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      // A revoked key's show-once box must not linger: the key it shows no
+      // longer authenticates anything.
+      if (_justMinted?.id == id) _justMinted = null;
+    });
+    await _loadKeys();
+  }
+
+  /// The API-key manager rows: existing keys, the show-once box for a key
+  /// minted this session, and the name-plus-create row.
+  List<Widget> _keyManager(DriftTokens t, TextStyle body) {
+    String stamp(DateTime d) =>
+        '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    return [
+      if (_keys.isEmpty)
+        Text(
+          'No keys yet — agents cannot connect until one exists.',
+          style: body,
+        )
+      else
+        for (final k in _keys)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 2),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${k.name} — created ${stamp(k.createdAt)}, last used '
+                    '${k.lastUsedAt == null ? 'never' : stamp(k.lastUsedAt!)}',
+                    overflow: TextOverflow.ellipsis,
+                    style: monoStyle(color: t.ink, size: 12.5),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, size: 17),
+                  tooltip: 'Revoke',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => _revokeKey(k.id),
+                ),
+              ],
+            ),
+          ),
+      if (_justMinted != null) ...[
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            Expanded(
+              child: SelectableText(
+                _justMinted!.key,
+                style: monoStyle(color: t.ink, size: 12.5),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.copy, size: 17),
+              tooltip: 'Copy',
+              onPressed: () =>
+                  Clipboard.setData(ClipboardData(text: _justMinted!.key)),
+            ),
+          ],
+        ),
+        Text('Copy it now — it cannot be shown again.', style: body),
+      ],
+      const SizedBox(height: 8),
+      Row(
+        children: [
+          Expanded(
+            child: TextField(
+              key: const Key('mcp-key-name'),
+              controller: _keyNameController,
+              style: monoStyle(color: t.ink, size: 13),
+              decoration: const InputDecoration(
+                labelText: 'New key name',
+                hintText: 'e.g. claude-code',
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton(
+            onPressed: _createKey,
+            child: const Text('Create key'),
+          ),
+        ],
+      ),
+      if (_keyError != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+            _keyError!,
+            style: TextStyle(fontSize: 12.5, height: 1.4, color: t.behind),
+          ),
+        ),
+    ];
   }
 
   @override
@@ -138,183 +325,280 @@ class _SettingsPaneState extends State<SettingsPane> {
     final t = tokensOf(context);
     final roots = widget.store.scanRoots();
     final body = TextStyle(fontSize: 13, color: t.slate, height: 1.5);
+    final auth = widget.auth;
+    // Desktop has one owner and no roles, so everything shows. On web the
+    // scanner, the shared GitHub token, and the MCP keys are admin-only on
+    // the server (they touch the server filesystem or server-wide
+    // credentials), so hide those controls from members rather than show
+    // buttons that 403.
+    final isAdmin = auth == null || auth.role == 'admin';
 
     return ListView(
       padding: EdgeInsets.zero,
       children: [
-        _SettingsSection(
-          label: 'Scanned folders',
-          first: true,
-          children: [
-            Text(
-              'Each folder is walked three levels deep, skipping node_modules, '
-              'target, build, and similar.',
-              style: body,
-            ),
-            const SizedBox(height: 9),
-            if (roots.isEmpty)
-              Text('No folders yet.', style: body)
-            else
-              for (final path in roots)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 2),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          path,
-                          overflow: TextOverflow.ellipsis,
-                          style: monoStyle(color: t.ink, size: 12.5),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.delete_outline, size: 17),
-                        tooltip: 'Remove',
-                        visualDensity: VisualDensity.compact,
-                        onPressed: () {
-                          widget.store.removeScanRoot(path);
-                          setState(() {});
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-            const SizedBox(height: 9),
-            Row(
-              children: [
-                OutlinedButton(
-                  onPressed: _addRoot,
-                  child: const Text('Add folder'),
-                ),
-                const SizedBox(width: 8),
-                FilledButton(
-                  onPressed: _scanning ? null : _scan,
-                  child: const Text('Scan now'),
-                ),
-              ],
-            ),
-            if (_scanSummary != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 10),
-                child: Text(
-                  _scanSummary!,
-                  style: monoStyle(color: t.slate, size: 12),
-                ),
-              ),
-          ],
-        ),
-
-        _SettingsSection(
-          label: 'GitHub token',
-          children: [
-            Text(
-              'Optional. Without one, release notes still come from public '
-              'Atom feeds. A token gets richer Markdown notes and faster '
-              'lookups. Stored in the host keyring, never on disk.',
-              style: body,
-            ),
-            const SizedBox(height: 9),
-            if (_hasStoredPat)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Text(
-                  'A token is set. Save a new one to replace it.',
-                  style: TextStyle(fontSize: 12.5, color: t.current),
-                ),
-              ),
-            TextField(
-              key: const Key('pat-field'),
-              controller: _patController,
-              // Never pre-populated with the stored value: a stored secret
-              // should not be readable by anyone who opens this dialog.
-              obscureText: true,
-              style: monoStyle(color: t.ink, size: 13),
-              decoration: const InputDecoration(
-                labelText: 'Personal access token',
-                hintText: 'Paste your token here',
-              ),
-            ),
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton(
-                onPressed: _savePat,
-                child: const Text('Save token'),
-              ),
-            ),
-            if (_patStatus != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  _patStatus!,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    height: 1.4,
-                    color: _patStatusIsError ? t.behind : t.current,
-                  ),
-                ),
-              ),
-          ],
-        ),
-
-        _SettingsSection(
-          label: 'MCP server',
-          children: [
-            if (widget.mcpError != null)
+        if (widget.isWeb)
+          _SettingsSection(
+            label: 'Server mode',
+            first: true,
+            children: [
               Text(
-                'The MCP server is not running: '
-                '${redact(widget.mcpError.toString())}',
-                style: TextStyle(fontSize: 12.5, color: t.behind, height: 1.4),
-              )
-            else if (widget.mcpPort != null) ...[
-              Text(
-                'http://127.0.0.1:${widget.mcpPort}$mcpPath',
-                style: monoStyle(color: t.ink, size: 12.5),
-              ),
-              const SizedBox(height: 4),
-              Text('Loopback only.', style: body),
-              const SizedBox(height: 9),
-              Text(
-                'Paste the bearer token into your MCP client config. It lives '
-                'in the host keyring, so this is the only place to read it.',
+                isAdmin
+                    ? 'This browser is a client of the deptracker server, '
+                          'which owns the watch database, does all the '
+                          'fetching, and scans its own filesystem. Scan roots '
+                          'below are server paths.'
+                    : 'This browser is a client of the deptracker server, '
+                          'which owns the watch database and does all the '
+                          'fetching. Scanning, the shared GitHub token, and '
+                          'agent keys are managed by an admin.',
                 style: body,
               ),
-              const SizedBox(height: 8),
-              if (_revealedToken == null)
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton(
-                    onPressed: _revealToken,
-                    child: const Text('Reveal token'),
+            ],
+          ),
+        if (widget.onScan != null && isAdmin)
+          _SettingsSection(
+            label: 'Scanned folders',
+            first: !widget.isWeb,
+            children: [
+              Text(
+                'Each folder is walked three levels deep, skipping '
+                'node_modules, target, build, and similar.',
+                style: body,
+              ),
+              const SizedBox(height: 9),
+              if (roots.isEmpty)
+                Text('No folders yet.', style: body)
+              else
+                for (final path in roots)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 2),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            path,
+                            overflow: TextOverflow.ellipsis,
+                            style: monoStyle(color: t.ink, size: 12.5),
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline, size: 17),
+                          tooltip: 'Remove',
+                          visualDensity: VisualDensity.compact,
+                          onPressed: () {
+                            widget.mutations.removeScanRoot(path);
+                            setState(() {});
+                          },
+                        ),
+                      ],
+                    ),
                   ),
+              const SizedBox(height: 9),
+              if (widget.pickDirectory != null)
+                Row(
+                  children: [
+                    OutlinedButton(
+                      onPressed: _addRoot,
+                      child: const Text('Add folder'),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton(
+                      onPressed: _scanning ? null : _scan,
+                      child: const Text('Scan now'),
+                    ),
+                  ],
                 )
               else
                 Row(
                   children: [
                     Expanded(
-                      child: SelectableText(
-                        _revealedToken!,
-                        style: monoStyle(color: t.ink, size: 12.5),
+                      child: TextField(
+                        key: const Key('scan-root-path'),
+                        controller: _rootPathController,
+                        style: monoStyle(color: t.ink, size: 13),
+                        decoration: const InputDecoration(
+                          labelText: 'Server path',
+                          hintText: '/srv/code',
+                        ),
                       ),
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.copy, size: 17),
-                      tooltip: 'Copy',
-                      onPressed: () => Clipboard.setData(
-                        ClipboardData(text: _revealedToken!),
-                      ),
+                    const SizedBox(width: 8),
+                    OutlinedButton(
+                      onPressed: _addTypedRoot,
+                      child: const Text('Add'),
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.refresh, size: 17),
-                      tooltip: 'Rotate token — invalidates the current one',
-                      onPressed: _rotateToken,
+                    const SizedBox(width: 8),
+                    FilledButton(
+                      onPressed: _scanning ? null : _scan,
+                      child: const Text('Scan now'),
                     ),
                   ],
                 ),
-            ] else
-              Text('Starting…', style: body),
-          ],
-        ),
+              if (_scanSummary != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Text(
+                    _scanSummary!,
+                    style: monoStyle(color: t.slate, size: 12),
+                  ),
+                ),
+            ],
+          ),
+
+        if (isAdmin)
+          _SettingsSection(
+            label: 'GitHub token',
+            children: [
+              Text(
+                widget.isWeb
+                    ? 'Optional. A token gets richer Markdown notes and '
+                          'faster lookups. Stored on the server, encrypted '
+                          'at rest beside its key file — never in this '
+                          'browser.'
+                    : 'Optional. Without one, release notes still come from '
+                          'public Atom feeds. A token gets richer Markdown '
+                          'notes and faster lookups. Stored in the host '
+                          'keyring, never on disk.',
+                style: body,
+              ),
+              const SizedBox(height: 9),
+              if (_hasStoredPat)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    'A token is set. Save a new one to replace it.',
+                    style: TextStyle(fontSize: 12.5, color: t.current),
+                  ),
+                ),
+              TextField(
+                key: const Key('pat-field'),
+                controller: _patController,
+                // Never pre-populated with the stored value: a stored secret
+                // should not be readable by anyone who opens this dialog.
+                obscureText: true,
+                style: monoStyle(color: t.ink, size: 13),
+                decoration: const InputDecoration(
+                  labelText: 'Personal access token',
+                  hintText: 'Paste your token here',
+                ),
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton(
+                  onPressed: _savePat,
+                  child: const Text('Save token'),
+                ),
+              ),
+              if (_patStatus != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    _patStatus!,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      height: 1.4,
+                      color: _patStatusIsError ? t.behind : t.current,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+
+        if (isAdmin)
+          _SettingsSection(
+            label: 'MCP server',
+            children: [
+              if (widget.mcpError != null) ...[
+                Text(
+                  'The MCP server is not running: '
+                  '${redact(widget.mcpError.toString())}',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: t.behind,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 9),
+              ] else if (widget.isWeb) ...[
+                Text(
+                  'Agents connect to $mcpPath on this server.',
+                  style: monoStyle(color: t.ink, size: 12.5),
+                ),
+                const SizedBox(height: 9),
+              ] else if (widget.mcpPort != null) ...[
+                Text(
+                  'http://127.0.0.1:${widget.mcpPort}$mcpPath',
+                  style: monoStyle(color: t.ink, size: 12.5),
+                ),
+                const SizedBox(height: 4),
+                Text('Loopback only.', style: body),
+                const SizedBox(height: 9),
+              ] else
+                Text('Starting…', style: body),
+              // The key list is pure store state, so it is manageable even
+              // when the socket failed to bind — a user whose MCP server
+              // will not start still needs to mint or revoke the keys it
+              // will authenticate with once it does. Only the desktop
+              // pre-bind "Starting…" window (no web, no error, no port yet)
+              // has no keys to show.
+              if (widget.isWeb ||
+                  widget.mcpError != null ||
+                  widget.mcpPort != null) ...[
+                Text(
+                  'Agents authenticate with an API key. Each key is shown '
+                  'once, when it is created — only a hash is kept.',
+                  style: body,
+                ),
+                const SizedBox(height: 8),
+                ..._keyManager(t, body),
+              ],
+            ],
+          ),
+
+        if (auth != null)
+          _SettingsSection(
+            label: 'Account',
+            children: [
+              Text(
+                'Signed in as ${auth.username ?? 'unknown'}'
+                '${auth.role == 'admin' ? ' (admin)' : ''}.',
+                style: body,
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  OutlinedButton(
+                    onPressed: auth.logout,
+                    child: const Text('Sign out'),
+                  ),
+                ],
+              ),
+              if (auth.role == 'admin') ...[
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        auth.registrationOpen
+                            ? 'Registration is open: anyone who can reach '
+                                  'this server can create an account.'
+                            : 'Registration is closed.',
+                        style: body,
+                      ),
+                    ),
+                    Switch(
+                      value: auth.registrationOpen,
+                      onChanged: (open) async {
+                        await auth.setRegistrationOpen(open);
+                        if (mounted) setState(() {});
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
       ],
     );
   }

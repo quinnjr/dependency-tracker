@@ -1,9 +1,12 @@
-import 'package:flutter/foundation.dart';
-import 'package:sqlite3/sqlite3.dart';
+import 'dart:typed_data';
+
+import 'package:sqlite3/common.dart';
 
 import 'canonicalize.dart';
+import 'db/db_open_io.dart' if (dart.library.js_interop) 'db/db_open_web.dart';
 import 'models.dart';
 import 'net.dart';
+import 'notify.dart';
 import 'versions.dart';
 
 const _schemaVersion = 1;
@@ -75,31 +78,41 @@ class Drift {
 /// `meta` and `http_cache` are internal bookkeeping the UI never renders and
 /// are exempt from the rule entirely — see the "meta and http cache" section
 /// below for the specifics.
-class Store extends ChangeNotifier implements EtagCache {
+class Store extends StoreListenable implements EtagCache {
   Store._(this._db);
 
-  final Database _db;
+  final CommonDatabase _db;
   bool _closed = false;
   bool _inTransaction = false;
   bool _pendingNotify = false;
+  bool _pendingRevisionBump = false;
 
   // Prepared once per Store and reused, because the scanner calls
   // [upsertWatch] once per parsed dependency inside its per-manifest
   // transaction — re-preparing two fixed SQL strings per dependency is the
   // per-row overhead [insertReleases] and [replaceUsagesForProject] already
   // avoid with their prepare-once/execute-many statements.
-  PreparedStatement? _upsertWatchInsert;
-  PreparedStatement? _upsertWatchSelect;
+  CommonPreparedStatement? _upsertWatchInsert;
+  CommonPreparedStatement? _upsertWatchSelect;
 
   static Store open(String file) {
-    final db = sqlite3.open(file);
-    final store = Store._(db);
+    final store = Store._(openDatabaseFile(file));
     store._migrate();
     return store;
   }
 
   static Store openInMemory() {
-    final store = Store._(sqlite3.openInMemory());
+    final store = Store._(openDatabaseInMemory());
+    store._migrate();
+    return store;
+  }
+
+  /// [open]'s awaitable twin, and the only opener the web build can use:
+  /// fetching sqlite3.wasm and attaching the IndexedDB VFS are async, so a
+  /// synchronous open cannot exist there. On the VM it opens the same
+  /// database [open] would.
+  static Future<Store> openAsync(String ref) async {
+    final store = Store._(await openDatabaseAsync(ref));
     store._migrate();
     return store;
   }
@@ -158,6 +171,13 @@ class Store extends ChangeNotifier implements EtagCache {
         read INTEGER NOT NULL DEFAULT 0,
         UNIQUE(watch_id, version)
       );
+      CREATE TABLE IF NOT EXISTS api_key (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        key_hash TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        last_used_at INTEGER
+      );
       CREATE TABLE IF NOT EXISTS http_cache (
         url TEXT PRIMARY KEY,
         etag TEXT,
@@ -167,6 +187,23 @@ class Store extends ChangeNotifier implements EtagCache {
       CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS secret (
+        key TEXT PRIMARY KEY,
+        nonce BLOB NOT NULL,
+        ciphertext BLOB NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS user (
+        id INTEGER PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS refresh_token (
+        hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+        expires_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS usage_by_project ON usage(project_path);
       CREATE INDEX IF NOT EXISTS release_by_watch ON release(watch_id);
@@ -225,6 +262,14 @@ class Store extends ChangeNotifier implements EtagCache {
     try {
       result = action();
       if (result is Future) {
+        // Detected while still synchronous — before any of the closure's
+        // continuations run — so the ROLLBACK below undoes the synchronous
+        // prefix that already executed inside BEGIN. The orphaned Future's
+        // post-`await` writes would land outside the transaction, which is
+        // exactly the un-atomic escape this rejects; drop its errors so a
+        // throwing misuse cannot surface as an unhandled zone error on top
+        // of the ArgumentError the caller already gets.
+        result.ignore();
         throw ArgumentError(
           'runInTransaction requires a synchronous action; an async closure '
           'would escape the transaction at its first await',
@@ -239,6 +284,7 @@ class Store extends ChangeNotifier implements EtagCache {
       // error nor strand _pendingNotify to fire on an unrelated later
       // transaction.
       _pendingNotify = false;
+      _pendingRevisionBump = false;
       _inTransaction = false;
       try {
         _db.execute('ROLLBACK');
@@ -254,6 +300,10 @@ class Store extends ChangeNotifier implements EtagCache {
     // taking the reentrant no-BEGIN path against a transaction that no
     // longer exists.
     _inTransaction = false;
+    if (_pendingRevisionBump) {
+      _pendingRevisionBump = false;
+      _advanceRevision();
+    }
     if (_pendingNotify) {
       _pendingNotify = false;
       notifyListeners();
@@ -264,11 +314,20 @@ class Store extends ChangeNotifier implements EtagCache {
   /// Notifies immediately when called outside any transaction (the common
   /// case), or defers to a single notification fired by the outermost
   /// [runInTransaction] call once it commits, when called from within one.
-  /// See [runInTransaction] for why this exists.
-  void _deferOrNotify() {
+  ///
+  /// [advanceRevision] also bumps the snapshot [revision] — this is the
+  /// single choke point every UI-table mutation passes through, so the
+  /// server's `GET /api/snapshot` ETag changes no matter which door (REST
+  /// or MCP) made the change. Two callers pass false: [metaSet], because the
+  /// `meta` table is not part of the snapshot, and [importSnapshot], because
+  /// it is the client applying the server's already-numbered snapshot and
+  /// must not renumber it. See [runInTransaction] for why this exists.
+  void _deferOrNotify({bool advanceRevision = true}) {
     if (_inTransaction) {
       _pendingNotify = true;
+      if (advanceRevision) _pendingRevisionBump = true;
     } else {
+      if (advanceRevision) _advanceRevision();
       notifyListeners();
     }
   }
@@ -415,10 +474,7 @@ class Store extends ChangeNotifier implements EtagCache {
   /// three filters'-worth of watches simultaneously and would otherwise pay
   /// for the base scan three times per rebuild (the two `IN`-queries only
   /// ever ran once each; the redundancy was in the base scans).
-  Map<WatchFilter, List<Watch>> watchesByFilter({
-    WatchKind? kind,
-    int? limit,
-  }) {
+  Map<WatchFilter, List<Watch>> watchesByFilter({WatchKind? kind, int? limit}) {
     final all = _baseWatches(kind);
     final candidates = _unsnoozed(all);
     final candidateIds = candidates.map((w) => w.id!).toList();
@@ -828,7 +884,7 @@ class Store extends ChangeNotifier implements EtagCache {
     List<Usage> usages,
   ) {
     runInTransaction(() {
-      PreparedStatement? stmt;
+      CommonPreparedStatement? stmt;
       try {
         _db.execute(
           'DELETE FROM usage WHERE project_path = ? AND manifest_file = ?',
@@ -861,6 +917,171 @@ class Store extends ChangeNotifier implements EtagCache {
       .map((r) => r['project_path'] as String)
       .toList();
 
+  // --- snapshot ----------------------------------------------------------------
+  //
+  // The sync protocol between the server and the browser's mirror Store:
+  // the server exports, the client imports. Only the four UI tables travel
+  // — secrets, users, refresh tokens, API keys, and the HTTP cache stay
+  // server-side by construction, not by filtering at the HTTP layer.
+
+  static const List<String> _snapshotTables = [
+    'watch',
+    'usage',
+    'release',
+    'scan_root',
+  ];
+
+  Map<String, Object?> exportSnapshot() => {
+    'revision': revision(),
+    for (final table in _snapshotTables)
+      table: _db
+          .select('SELECT * FROM $table')
+          .map(Map<String, Object?>.from)
+          .toList(),
+  };
+
+  /// Client-side hydration: replaces the four UI tables with exactly what
+  /// [snapshot] holds, ids included, in one transaction and one
+  /// notification. Column names are read from the rows themselves — they
+  /// come from this app's own [exportSnapshot] over the same schema, not
+  /// from attacker input, and the mirror this feeds is an in-memory,
+  /// disposable database.
+  ///
+  /// Within one server run the revision only increases, so a snapshot whose
+  /// revision is older than what the mirror already holds is a response that
+  /// overtook a newer one in flight — applying it would roll the user's own
+  /// change backward, so it is dropped. But a snapshot carrying a different
+  /// `generation` than the mirror last saw comes from a server that
+  /// restarted or was restored from a backup, resetting its revision counter
+  /// — there the lower number *is* the current truth and must be applied,
+  /// or an open tab would freeze on stale state forever. Returns whether the
+  /// snapshot was applied.
+  bool importSnapshot(Map<String, Object?> snapshot) {
+    final incoming = snapshot['revision'];
+    final incomingGen = snapshot['generation'];
+    final sameTimeline =
+        incomingGen is! String || incomingGen == metaGet('generation');
+    if (sameTimeline && incoming is int && incoming < revision()) return false;
+    runInTransaction(() {
+      // Children before parents, so ON DELETE CASCADE never fires against
+      // rows the snapshot is about to re-create.
+      for (final table in ['usage', 'release', 'watch', 'scan_root']) {
+        _db.execute('DELETE FROM $table');
+      }
+      for (final table in _snapshotTables) {
+        final rows = (snapshot[table] as List? ?? const [])
+            .cast<Map<String, Object?>>();
+        if (rows.isEmpty) continue;
+        final cols = rows.first.keys.toList();
+        final stmt = _db.prepare(
+          'INSERT INTO $table (${cols.join(', ')}) '
+          'VALUES (${List.filled(cols.length, '?').join(', ')})',
+        );
+        try {
+          for (final row in rows) {
+            stmt.execute([for (final c in cols) row[c]]);
+          }
+        } finally {
+          stmt.dispose();
+        }
+      }
+      // Not metaSet: that notifies on its own, and this import owes its
+      // listeners exactly one notification, after COMMIT.
+      if (incoming is int) {
+        _db.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
+          'revision',
+          '$incoming',
+        ]);
+      }
+      if (incomingGen is String) {
+        _db.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
+          'generation',
+          incomingGen,
+        ]);
+      }
+    });
+    // The revision came from the snapshot itself (set inside the
+    // transaction above), so this notification must not advance it.
+    _deferOrNotify(advanceRevision: false);
+    return true;
+  }
+
+  /// Monotonic change counter for the snapshot protocol. Advanced
+  /// automatically by [_deferOrNotify] on every UI-visible server-side
+  /// mutation; this public form exists for callers and tests that want to
+  /// advance it explicitly. Does not notify.
+  int bumpRevision() => _advanceRevision();
+
+  int _advanceRevision() {
+    final next = revision() + 1;
+    _db.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
+      'revision',
+      '$next',
+    ]);
+    return next;
+  }
+
+  int revision() => int.tryParse(metaGet('revision') ?? '') ?? 0;
+
+  // --- api keys ----------------------------------------------------------------
+  //
+  // Named MCP API keys, stored hash-only (see lib/api_keys.dart for minting
+  // and authentication). `api_key` is UI-visible state — the settings pane
+  // renders the key list — so insert and revoke follow the notify
+  // convention. [touchApiKey] is the deliberate exception: it runs on every
+  // authenticated MCP request, and a per-request UI rebuild would be a
+  // denial-of-service on the shell.
+
+  int insertApiKey(String name, String keyHash) {
+    final rows = _db.select(
+      'INSERT INTO api_key (name, key_hash, created_at) VALUES (?, ?, ?) '
+      'RETURNING id',
+      [name, keyHash, _epoch(DateTime.now())],
+    );
+    final id = rows.first['id'] as int;
+    _deferOrNotify();
+    return id;
+  }
+
+  List<ApiKeyInfo> apiKeys() => _db
+      .select(
+        'SELECT id, name, created_at, last_used_at FROM api_key ORDER BY name',
+      )
+      .map(
+        (r) => ApiKeyInfo(
+          id: r['id'] as int,
+          name: r['name'] as String,
+          createdAt: DateTime.fromMillisecondsSinceEpoch(
+            (r['created_at'] as int) * 1000,
+            isUtc: true,
+          ),
+          lastUsedAt: r['last_used_at'] == null
+              ? null
+              : DateTime.fromMillisecondsSinceEpoch(
+                  (r['last_used_at'] as int) * 1000,
+                  isUtc: true,
+                ),
+        ),
+      )
+      .toList();
+
+  void revokeApiKey(int id) {
+    _db.execute('DELETE FROM api_key WHERE id = ?', [id]);
+    _deferOrNotify();
+  }
+
+  int? apiKeyIdForHash(String keyHash) {
+    final rows = _db.select('SELECT id FROM api_key WHERE key_hash = ?', [
+      keyHash,
+    ]);
+    return rows.isEmpty ? null : rows.first['id'] as int;
+  }
+
+  void touchApiKey(int id, DateTime at) => _db.execute(
+    'UPDATE api_key SET last_used_at = ? WHERE id = ?',
+    [_epoch(at), id],
+  );
+
   // --- scan roots --------------------------------------------------------------
 
   List<String> scanRoots() => _db
@@ -892,19 +1113,114 @@ class Store extends ChangeNotifier implements EtagCache {
     return rows.isEmpty ? null : rows.first['value'] as String;
   }
 
-  /// `meta` is internal bookkeeping, not UI-rendered state, so this would be
-  /// exempt from the notify convention like [putCache] below. It still
-  /// notifies because its only caller today is [_migrate], which runs before
-  /// `Store.open`/`openInMemory` return and thus before any listener can have
-  /// attached — the notification is a no-op in practice, so removing it
-  /// would only churn a passing test for symmetry's sake.
+  /// `meta` is internal bookkeeping, not one of the snapshot's UI tables, so
+  /// this routes through the notify choke point with `advanceRevision: false`
+  /// — it participates in the transaction-batching and notify-once
+  /// convention the rest of the file follows, but a `meta` write (a schema
+  /// version, the registration flag) must not move the snapshot ETag and
+  /// make every client re-fetch. [_migrate]'s call runs before any listener
+  /// attaches, so its notification is a harmless no-op.
   void metaSet(String key, String value) {
     _db.execute('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', [
       key,
       value,
     ]);
-    notifyListeners();
+    _deferOrNotify(advanceRevision: false);
   }
+
+  // `user` and `refresh_token` are server bookkeeping like `secret` below:
+  // the desktop UI never renders accounts, so their mutators do not notify.
+  // Passwords arrive here already Argon2id-hashed and refresh tokens
+  // already SHA-256-hashed (lib/server/auth.dart) — the Store never sees
+  // either in the clear.
+
+  int insertUser(String username, String passwordHash, String role) {
+    final rows = _db.select(
+      'INSERT INTO user (username, password_hash, role, created_at) '
+      'VALUES (?, ?, ?, ?) RETURNING id',
+      [username, passwordHash, role, _epoch(DateTime.now())],
+    );
+    return rows.first['id'] as int;
+  }
+
+  ({int id, String passwordHash, String role})? userByName(String username) {
+    final rows = _db.select(
+      'SELECT id, password_hash, role FROM user WHERE username = ?',
+      [username],
+    );
+    if (rows.isEmpty) return null;
+    return (
+      id: rows.first['id'] as int,
+      passwordHash: rows.first['password_hash'] as String,
+      role: rows.first['role'] as String,
+    );
+  }
+
+  int userCount() =>
+      _db.select('SELECT COUNT(*) AS c FROM user').first['c'] as int;
+
+  String? userRoleById(int id) {
+    final rows = _db.select('SELECT role FROM user WHERE id = ?', [id]);
+    return rows.isEmpty ? null : rows.first['role'] as String;
+  }
+
+  void setUserPasswordHash(int id, String passwordHash) => _db.execute(
+    'UPDATE user SET password_hash = ? WHERE id = ?',
+    [passwordHash, id],
+  );
+
+  void insertRefreshToken(String hash, int userId, DateTime expires) =>
+      _db.execute(
+        'INSERT INTO refresh_token (hash, user_id, expires_at) '
+        'VALUES (?, ?, ?)',
+        [hash, userId, _epoch(expires)],
+      );
+
+  ({int userId, DateTime expiresAt})? refreshTokenByHash(String hash) {
+    final rows = _db.select(
+      'SELECT user_id, expires_at FROM refresh_token WHERE hash = ?',
+      [hash],
+    );
+    if (rows.isEmpty) return null;
+    return (
+      userId: rows.first['user_id'] as int,
+      expiresAt: DateTime.fromMillisecondsSinceEpoch(
+        (rows.first['expires_at'] as int) * 1000,
+        isUtc: true,
+      ),
+    );
+  }
+
+  void deleteRefreshToken(String hash) =>
+      _db.execute('DELETE FROM refresh_token WHERE hash = ?', [hash]);
+
+  // `secret` follows the same exemption as `meta`/`http_cache`: server
+  // bookkeeping the UI never renders, so its mutators do not notify. The
+  // rows are AES-GCM ciphertext produced by SqliteSecretBackend
+  // (lib/server/sqlite_secrets.dart); the Store never sees a plaintext
+  // secret, which keeps the "never passed to Store" rule intact.
+
+  void secretPut(String key, List<int> nonce, List<int> ciphertext) =>
+      _db.execute(
+        'INSERT OR REPLACE INTO secret (key, nonce, ciphertext) '
+        'VALUES (?, ?, ?)',
+        [key, Uint8List.fromList(nonce), Uint8List.fromList(ciphertext)],
+      );
+
+  ({List<int> nonce, List<int> ciphertext})? secretGet(String key) {
+    final rows = _db.select(
+      'SELECT nonce, ciphertext FROM secret WHERE key = ?',
+      [key],
+    );
+    if (rows.isEmpty) return null;
+    return (
+      nonce: rows.first['nonce'] as List<int>,
+      ciphertext: rows.first['ciphertext'] as List<int>,
+    );
+  }
+
+  void secretDelete(String key) =>
+      _db.execute('DELETE FROM secret WHERE key = ?', [key]);
 
   @override
   String? etagFor(String url) {

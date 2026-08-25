@@ -7,9 +7,9 @@ import 'package:mcp_sse_server/mcp_sse_server.dart' as mcp;
 
 import '../paths.dart';
 import '../redact.dart';
+import 'endpoint.dart';
 
-/// Single endpoint for the Streamable HTTP transport.
-const String mcpPath = '/mcp';
+export 'endpoint.dart' show mcpPath;
 
 /// How long a session may sit idle before it is dropped.
 ///
@@ -100,25 +100,32 @@ class _Session {
 /// `McpHttpServer` binds its own socket and has no authorization hook — its
 /// docs are explicit that Origin checking is "rebinding control, never
 /// authorization". Since any page in any browser can POST to loopback, the
-/// bearer token is the only thing actually gating this server, so the socket
+/// API key is the only thing actually gating this server, so the socket
 /// and the auth check stay here and the package is driven through the
 /// [mcp.SseTransport] it exposes for exactly this purpose.
+///
+/// [authenticate] receives the presented bearer value and returns the
+/// matching API key's id, or null to refuse — in practice
+/// `authenticateApiKey` from `lib/api_keys.dart` over the live [Store].
+/// With zero keys minted every request is a 401, but the server still runs:
+/// unlike the old single-token model there is no secret to fail to acquire,
+/// so nothing here can refuse to start.
 class McpTransport {
   McpTransport({
     required mcp.McpServer Function() onSession,
-    required String bearerToken,
+    required int? Function(String presented) authenticate,
     this.requestedPort = 0,
     this.idleTimeout = mcpSessionIdleTimeout,
-  }) : // Fields are private so nothing outside this file can read the token
-       // back out; that makes an initializing formal (which would require a
-       // public `bearerToken` field) unavailable here.
+  }) : // Fields are private so nothing outside this file can drive the
+       // authenticator directly; that makes an initializing formal (which
+       // would require a public field) unavailable here.
        // ignore: prefer_initializing_formals
        _onSession = onSession,
        // ignore: prefer_initializing_formals
-       _bearerToken = bearerToken;
+       _authenticate = authenticate;
 
   final mcp.McpServer Function() _onSession;
-  final String _bearerToken;
+  final int? Function(String) _authenticate;
   final int requestedPort;
   final Duration idleTimeout;
 
@@ -142,7 +149,7 @@ class McpTransport {
       requestedPort,
     );
     _http = server;
-    server.listen(_handle, onError: (_) {});
+    server.listen(handleRequest, onError: (_) {});
 
     // SSE keep-alives are the transport's job now: mcp.SseTransport sends a
     // heartbeat on its own schedule, so the timer that used to live here would
@@ -163,7 +170,12 @@ class McpTransport {
     _http = null;
   }
 
-  Future<void> _handle(HttpRequest request) async {
+  /// The full MCP request pipeline (origin check, API-key auth, dispatch).
+  /// Public so a host serving several mounts from one listener — the web
+  /// gateway's AppServer — can forward `/mcp` traffic here without this
+  /// transport binding its own socket; the desktop app still calls [start]
+  /// and lets the transport listen for itself.
+  Future<void> handleRequest(HttpRequest request) async {
     final response = request.response;
     try {
       if (!isAllowedOrigin(request.headers.value('origin'))) {
@@ -179,8 +191,8 @@ class McpTransport {
       final presented = auth.startsWith(prefix)
           ? auth.substring(prefix.length)
           : '';
-      if (!constantTimeEquals(presented, _bearerToken)) {
-        await _plain(response, HttpStatus.unauthorized, 'invalid bearer token');
+      if (_authenticate(presented) == null) {
+        await _plain(response, HttpStatus.unauthorized, 'invalid API key');
         return;
       }
 

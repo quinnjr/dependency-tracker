@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:deptracker/api_keys.dart';
+import 'package:deptracker/bootstrap/app_resources.dart';
 import 'package:deptracker/scanner.dart';
 import 'package:deptracker/secrets.dart';
 import 'package:deptracker/store.dart';
@@ -13,7 +15,7 @@ import 'package:deptracker/ui/settings.dart';
 /// caller applies `redact()` before rendering it.
 /// A backend that fails every read the way an absent secret service does, so
 /// the pane's PAT probe takes its KeyringUnavailable arm.
-class _UnavailableBackend implements SecretBackend {
+class _UnavailableBackend extends SecretBackend {
   @override
   Future<String?> read(String key) async =>
       throw Exception('no secret service');
@@ -26,7 +28,7 @@ class _UnavailableBackend implements SecretBackend {
   Future<void> delete(String key) async {}
 }
 
-class _ThrowingBackend implements SecretBackend {
+class _ThrowingBackend extends SecretBackend {
   @override
   Future<String?> read(String key) async => null;
 
@@ -44,21 +46,31 @@ late Secrets secrets;
 late int scans;
 String? pick;
 
-Widget pane({int? mcpPort = 51234, Object? mcpError}) => MaterialApp(
-  home: Scaffold(
-    body: SettingsPane(
-      store: store,
-      secrets: secrets,
-      pickDirectory: () async => pick,
-      onScan: () async {
-        scans++;
-        return const ScanResult(projectsScanned: 2, depsFound: 9, errors: []);
-      },
-      mcpPort: mcpPort,
-      mcpError: mcpError,
-    ),
-  ),
-);
+Widget pane({int? mcpPort = 51234, Object? mcpError, bool isWeb = false}) =>
+    MaterialApp(
+      home: Scaffold(
+        body: SettingsPane(
+          store: store,
+          secrets: secrets,
+          // Web has no native picker (server paths are typed in) but does
+          // scan — on the server's filesystem, over REST.
+          pickDirectory: isWeb ? null : () async => pick,
+          onScan: () async {
+            scans++;
+            return const ScanResult(
+              projectsScanned: 2,
+              depsFound: 9,
+              errors: [],
+            );
+          },
+          mcpKeys: McpKeyOps.local(store),
+          mutations: StoreMutations.local(store),
+          mcpPort: mcpPort,
+          mcpError: mcpError,
+          isWeb: isWeb,
+        ),
+      ),
+    );
 
 /// Scrolls [f] into view, then taps it.
 ///
@@ -168,36 +180,59 @@ void main() {
     expect(find.textContaining('51234'), findsOneWidget);
   });
 
-  testWidgets('the mcp token is not displayed until asked for', (tester) async {
-    final token = await secrets.mcpToken();
+  testWidgets('creating a key shows it exactly once, and only its hash '
+      'survives', (tester) async {
     await tester.pumpWidget(pane());
     await tester.pumpAndSettle();
-    expect(find.textContaining(token), findsNothing);
-    await _tap(tester, find.widgetWithText(TextButton, 'Reveal token'));
+
+    await tester.enterText(
+      find.byKey(const Key('mcp-key-name')),
+      'claude-code',
+    );
+    await _tap(tester, find.widgetWithText(OutlinedButton, 'Create key'));
     await tester.pumpAndSettle();
-    expect(find.textContaining(token), findsOneWidget);
+
+    // The minted key is on screen once, marked unrepeatable, and works.
+    final shown = tester
+        .widget<SelectableText>(find.byType(SelectableText))
+        .data!;
+    expect(shown, startsWith('dtk_'));
+    expect(find.textContaining('cannot be shown again'), findsOneWidget);
+    expect(authenticateApiKey(store, shown), isNotNull);
+    expect(store.apiKeys().single.name, 'claude-code');
   });
 
-  testWidgets('rotating the mcp token replaces it with a new one (M3)', (
+  testWidgets('revoking a key removes it from the list and the store', (
     tester,
   ) async {
+    final minted = mintApiKey(store, 'stale-agent');
     await tester.pumpWidget(pane());
     await tester.pumpAndSettle();
-    await _tap(tester, find.widgetWithText(TextButton, 'Reveal token'));
-    await tester.pumpAndSettle();
-    final before = await secrets.mcpToken();
-    expect(find.textContaining(before), findsOneWidget);
+    expect(find.textContaining('stale-agent'), findsOneWidget);
 
-    await _tap(
-      tester,
-      find.byTooltip('Rotate token — invalidates the current one'),
+    await _tap(tester, find.byTooltip('Revoke'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('stale-agent'), findsNothing);
+    expect(authenticateApiKey(store, minted.key), isNull);
+  });
+
+  testWidgets('a duplicate key name is refused with an inline message', (
+    tester,
+  ) async {
+    mintApiKey(store, 'claude-code');
+    await tester.pumpWidget(pane());
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const Key('mcp-key-name')),
+      'claude-code',
     );
+    await _tap(tester, find.widgetWithText(OutlinedButton, 'Create key'));
     await tester.pumpAndSettle();
 
-    final after = await secrets.mcpToken();
-    expect(after, isNot(before));
-    expect(find.textContaining(after), findsOneWidget);
-    expect(find.textContaining(before), findsNothing);
+    expect(store.apiKeys(), hasLength(1));
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('an mcp startup failure is explained, not hidden', (
@@ -248,7 +283,7 @@ void main() {
 }
 
 // The three remaining branches: a keyring that fails while probing for a
-// stored PAT, copying the revealed MCP token, and the pre-startup state.
+// stored PAT, copying a freshly minted API key, and the pre-startup state.
 void settingsEdgeTests() {
   testWidgets('a keyring failure while probing for a stored PAT is swallowed, '
       'not shown twice', (tester) async {
@@ -267,9 +302,9 @@ void settingsEdgeTests() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('the mcp token can be copied to the clipboard', (tester) async {
-    // The token is never displayed until asked for, so copy is the only
-    // practical way to get it into an agent's config.
+  testWidgets('a minted key can be copied to the clipboard', (tester) async {
+    // The key is shown exactly once, so copy is the only practical way to
+    // get it into an agent's config.
     final copied = <String>[];
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       SystemChannels.platform,
@@ -290,16 +325,18 @@ void settingsEdgeTests() {
     await tester.pumpWidget(pane());
     await tester.pumpAndSettle();
 
-    await _tap(tester, find.text('Reveal token'));
+    await tester.enterText(find.byKey(const Key('mcp-key-name')), 'agent');
+    await _tap(tester, find.widgetWithText(OutlinedButton, 'Create key'));
     await tester.pumpAndSettle();
 
     await _tap(tester, find.widgetWithIcon(IconButton, Icons.copy));
     await tester.pumpAndSettle();
 
     expect(copied, hasLength(1));
-    expect(copied.single, isNotEmpty);
-    // What lands on the clipboard must be the token itself, not a label.
-    expect(copied.single, await secrets.mcpToken());
+    // What lands on the clipboard must be the key itself, not a label —
+    // and it must be the key that actually authenticates.
+    expect(copied.single, startsWith('dtk_'));
+    expect(authenticateApiKey(store, copied.single), isNotNull);
   });
 
   testWidgets('before the server has a port, the pane says it is starting', (
@@ -310,5 +347,42 @@ void settingsEdgeTests() {
     await tester.pumpAndSettle();
 
     expect(find.text('Starting…'), findsOneWidget);
+  });
+
+  testWidgets('server mode scans by typed server path, no picker', (
+    tester,
+  ) async {
+    await tester.pumpWidget(pane(isWeb: true, mcpPort: null));
+    await tester.pumpAndSettle();
+
+    expect(find.text('SERVER MODE'), findsOneWidget);
+    expect(find.text('SCANNED FOLDERS'), findsOneWidget);
+    expect(find.widgetWithText(OutlinedButton, 'Add folder'), findsNothing);
+
+    await tester.enterText(
+      find.byKey(const Key('scan-root-path')),
+      '/srv/code',
+    );
+    await _tap(tester, find.widgetWithText(OutlinedButton, 'Add'));
+    await tester.pumpAndSettle();
+    expect(store.scanRoots(), ['/srv/code']);
+
+    // The key manager renders on web too — keys are the server's.
+    expect(find.text('MCP SERVER'), findsOneWidget);
+    expect(find.byKey(const Key('mcp-key-name')), findsOneWidget);
+    // And the token copy names the server, not a keyring or a tab.
+    expect(find.textContaining('encrypted at rest'), findsOneWidget);
+  });
+
+  testWidgets('the desktop build shows the picker and no server-mode note', (
+    tester,
+  ) async {
+    await tester.pumpWidget(pane());
+    await tester.pumpAndSettle();
+
+    expect(find.text('SCANNED FOLDERS'), findsOneWidget);
+    expect(find.text('MCP SERVER'), findsOneWidget);
+    expect(find.text('SERVER MODE'), findsNothing);
+    expect(find.widgetWithText(OutlinedButton, 'Add folder'), findsOneWidget);
   });
 }

@@ -37,6 +37,26 @@ class RefreshReport {
   /// were not marked stale, so they will look "never refreshed" rather than
   /// "hit a rate limit" until a later refresh reaches them.
   final bool staleMarkingFailed;
+
+  /// The wire form the server sends and the web client reads. Kept here, on
+  /// the type itself, so the two ends cannot drift apart the way two
+  /// hand-written copies (one in `server/http.dart`, one in
+  /// `client/sync_client.dart`) would.
+  Map<String, Object?> toJson() => {
+    'refreshed': refreshed,
+    'failed': failed,
+    'newReleases': newReleases,
+    'rateLimited': rateLimited,
+    'staleMarkingFailed': staleMarkingFailed,
+  };
+
+  factory RefreshReport.fromJson(Map<String, Object?> json) => RefreshReport(
+    refreshed: json['refreshed'] as int? ?? 0,
+    failed: json['failed'] as int? ?? 0,
+    newReleases: json['newReleases'] as int? ?? 0,
+    rateLimited: json['rateLimited'] as bool? ?? false,
+    staleMarkingFailed: json['staleMarkingFailed'] as bool? ?? false,
+  );
 }
 
 /// Recorded on a watch a rate-limited refresh never got to, so the UI and
